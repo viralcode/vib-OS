@@ -389,11 +389,25 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 🙏 Acknowledgments
 
-- **DOOM**: id Software for the original Doom engine
-- **minimp3**: lieff for the MP3 decoder library
-- **picojpeg**: Rich Geldreich for the JPEG decoder
-- **QEMU**: The QEMU team for the excellent emulator
-- **OSDev Community**: For invaluable resources and documentation
+This project uses the following excellent open-source libraries:
+
+### Media Libraries
+- **minimp3** by lieff - CC0 MP3 decoder
+- **picojpeg** by Rich Geldreich - Public Domain JPEG decoder
+- **stb_image** by Sean Barrett - MIT/Public Domain image loader (PNG, JPEG, BMP, TGA, etc.)
+- **stb_image_write** by Sean Barrett - MIT/Public Domain image writer
+
+### Cryptography
+- **TLSe** by Eduard Suica - BSD 2-Clause TLS 1.2/1.3 implementation
+
+### Games & Tools
+- **DOOM** by id Software - Original Doom engine
+- **QEMU** - The QEMU team for the excellent emulator
+
+### Community
+- **OSDev Community** - For invaluable resources and documentation
+
+See [THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md) for full license texts and usage examples.
 
 ## 📞 Contact
 

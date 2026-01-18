@@ -1,5 +1,6 @@
 /*
- * Vib-OS - Media helpers (JPEG/MP3 decoding)
+ * Vib-OS - Media helpers (JPEG/PNG/BMP/MP3 decoding)
+ * Uses: picojpeg, stb_image, minimp3
  */
 
 #include "types.h"
@@ -7,6 +8,7 @@
 #include "fs/vfs.h"
 #include "mm/kmalloc.h"
 #include "media/media.h"
+#include "string.h"
 
 /* --------------------------------------------------------------------- */
 /* File loading                                                          */
@@ -202,4 +204,41 @@ void media_free_audio(media_audio_t *audio)
     audio->sample_count = 0;
     audio->sample_rate = 0;
     audio->channels = 0;
+}
+
+/* --------------------------------------------------------------------- */
+/* STB Image support (PNG, BMP, TGA, etc.)                              */
+/* --------------------------------------------------------------------- */
+
+int media_decode_image(const uint8_t *data, size_t size, media_image_t *out)
+{
+    if (!data || !out) return -EINVAL;
+    
+    int width, height, channels;
+    unsigned char *pixels = stbi_load_from_memory_wrapper(data, (int)size, 
+                                                          &width, &height, &channels, 4);
+    
+    if (!pixels) {
+        printk(KERN_ERR "STB_IMAGE: Failed to decode image: %s\n", 
+               stbi_failure_reason_wrapper());
+        return -EINVAL;
+    }
+    
+    out->width = (uint32_t)width;
+    out->height = (uint32_t)height;
+    out->pixels = (uint32_t *)pixels;
+    
+    return 0;
+}
+
+int media_decode_png(const uint8_t *data, size_t size, media_image_t *out)
+{
+    /* STB image auto-detects format, so we can use the same function */
+    return media_decode_image(data, size, out);
+}
+
+int media_decode_bmp(const uint8_t *data, size_t size, media_image_t *out)
+{
+    /* STB image auto-detects format, so we can use the same function */
+    return media_decode_image(data, size, out);
 }
