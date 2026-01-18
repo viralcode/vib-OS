@@ -125,6 +125,15 @@ struct task_struct {
 #define PF_KTHREAD          (1 << 0)    /* Kernel thread */
 #define PF_EXITING          (1 << 1)    /* Being killed */
 #define PF_IDLE             (1 << 2)    /* Idle task */
+#define PF_USER             (1 << 3)    /* User process (runs at EL0) */
+#define PF_FORKNOEXEC       (1 << 4)    /* Forked but not yet exec'd */
+
+/* User process memory layout */
+#define USER_STACK_TOP      0x7FFFFFFFF000ULL   /* Top of user stack */
+#define USER_STACK_SIZE     (2 * 1024 * 1024)   /* 2MB user stack */
+#define USER_CODE_BASE      0x400000ULL         /* User code start */
+#define USER_HEAP_BASE      0x10000000ULL       /* User heap start */
+#define USER_MMAP_BASE      0x7F0000000000ULL   /* mmap region */
 
 /* ===================================================================== */
 /* Per-CPU run queue */

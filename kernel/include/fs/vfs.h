@@ -318,6 +318,15 @@ ssize_t vfs_write(struct file *file, const char *buf, size_t count);
  */
 loff_t vfs_lseek(struct file *file, loff_t offset, int whence);
 
+/* Additional declarations - Write to a file
+ */
+ssize_t vfs_write(struct file *file, const char *buf, size_t count);
+
+/**
+ * vfs_lseek - Seek in a file
+ */
+loff_t vfs_lseek(struct file *file, loff_t offset, int whence);
+
 /**
  * vfs_mkdir - Create a directory
  */

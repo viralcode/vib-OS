@@ -108,6 +108,11 @@ typedef void (*irq_handler_t)(uint32_t irq, void *data);
 void gic_init(void);
 
 /**
+ * gic_cpu_init - Initialize GIC for secondary CPUs (SMP)
+ */
+void gic_cpu_init(void);
+
+/**
  * gic_enable_irq - Enable an interrupt
  * @irq: Interrupt number
  */

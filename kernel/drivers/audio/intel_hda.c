@@ -349,88 +349,58 @@ void intel_hda_init(pci_device_t *pci_dev) {
 }
 
 
+/* ===================================================================== */
+/* DMA Ring Buffer Management for Stable Audio Playback */
+/* ===================================================================== */
+
+/* Ring buffer configuration */
+#define HDA_RING_BUFFER_SIZE    (256 * 1024)  /* 256KB ring buffer */
+#define HDA_RING_NUM_ENTRIES    32            /* BDL entries for ring */
+#define HDA_RING_ENTRY_SIZE     (HDA_RING_BUFFER_SIZE / HDA_RING_NUM_ENTRIES)
+
 /* Global DMA Resources for Output Stream 0 */
 static uint8_t *dma_buffer = 0;
 static hda_bdl_entry_t *bdl = 0;
+static uint32_t ring_write_pos = 0;       /* Where we write new data */
+static uint32_t ring_play_pos = 0;        /* Where hardware is playing */
+static volatile int audio_playing = 0;    /* Is audio currently playing */
 
-int intel_hda_play_pcm(const void *data, uint32_t samples, uint8_t channels, uint32_t sample_rate) {
-    if (!hda_regs) return -1;
+/* Initialize DMA ring buffer resources */
+static int hda_init_ring_buffer(void)
+{
+    if (dma_buffer) return 0;  /* Already initialized */
     
-    /* Calculate size in bytes (16-bit = 2 bytes) */
-    uint32_t size = samples * channels * 2;
-    if (size > 64 * 1024) {
-        size = 64 * 1024;
-        samples = size / (channels * 2);
+    /* BDL Must be 128-byte aligned */
+    void *raw_bdl = kmalloc(HDA_RING_NUM_ENTRIES * sizeof(hda_bdl_entry_t) + 128);
+    if (!raw_bdl) return -1;
+    bdl = (hda_bdl_entry_t *)(((uint64_t)raw_bdl + 127) & ~127ULL);
+    
+    /* DMA Buffer alignment (128 bytes recommended) */
+    void *raw_buf = kmalloc(HDA_RING_BUFFER_SIZE + 128);
+    if (!raw_buf) return -1;
+    dma_buffer = (uint8_t *)(((uint64_t)raw_buf + 127) & ~127ULL);
+    
+    memset(dma_buffer, 0, HDA_RING_BUFFER_SIZE);
+    memset(bdl, 0, HDA_RING_NUM_ENTRIES * sizeof(hda_bdl_entry_t));
+    
+    /* Set up circular BDL entries */
+    for (int i = 0; i < HDA_RING_NUM_ENTRIES; i++) {
+        bdl[i].addr = (uint64_t)(dma_buffer + i * HDA_RING_ENTRY_SIZE);
+        bdl[i].len = HDA_RING_ENTRY_SIZE;
+        bdl[i].flags = (i == HDA_RING_NUM_ENTRIES - 1) ? 1 : 0;  /* IOC on last */
     }
     
-    /* Allocate resources once with 128-byte alignment for BDL */
-    if (!dma_buffer) {
-        /* BDL Must be 128-byte aligned */
-        void *raw_bdl = kmalloc(128 * sizeof(hda_bdl_entry_t) + 128);
-        bdl = (hda_bdl_entry_t *)(((uint64_t)raw_bdl + 127) & ~127ULL);
-        
-        /* DMA Buffer alignment (128 bytes recommended) */
-        void *raw_buf = kmalloc(64 * 1024 + 128);
-        dma_buffer = (uint8_t *)(((uint64_t)raw_buf + 127) & ~127ULL);
-        
-        /* stream_base is set during intel_hda_init() */
-        memset(dma_buffer, 0, 64 * 1024);
-        memset(bdl, 0, 128 * sizeof(hda_bdl_entry_t));
-    }
+    ring_write_pos = 0;
+    ring_play_pos = 0;
+    audio_playing = 0;
     
-    /* 1. Reset Stream properly */
-    uint32_t ctl_offset = stream_base + HDA_SD_CTL;
-    
-    /* Clear RUN and Wait */
-    hda_write32(ctl_offset, 0); 
-    /* Spin wait for Run=0 */
-    for(int timeout=0; timeout<1000; timeout++) {
-        if (! (hda_read32(ctl_offset) & HDA_SD_CTL_RUN)) break;
-    }
-    
-    /* Set SRST (Bit 0) and Wait */
-    hda_write32(ctl_offset, 1);
-    for(int timeout=0; timeout<1000; timeout++) {
-        if (hda_read32(ctl_offset) & 1) break;
-    }
-    
-    /* Clear SRST and Wait */
-    hda_write32(ctl_offset, 0);
-    for(int timeout=0; timeout<1000; timeout++) {
-        if (! (hda_read32(ctl_offset) & 1)) break;
-    }
-    
-    /* Wait for stream to stop? loop? */
-    
-    /* 2. Reset Stream (Set SRST bit 0 - Oh wait, different reg? */
-    /* Stream Reset is effectively clearing RUN. 
-       Actually some docs say set SRST in SDmCTL. But simpler acts just clearing RUN resets DMA pointer. */
-       
-    /* 3. Setup Buffer */
-    memcpy(dma_buffer, data, size);
-    
-    /* Enable Global Interrupts (GIE) */
-    hda_write32(HDA_INTCTL, 0x80000000 | 0x40000000);
+    return 0;
+}
 
-    /* Setup BDL entries */
-    uint32_t bdl_entries = (size <= 4096) ? 1 : 2;
-    if (bdl_entries == 1) {
-        bdl[0].addr = (uint64_t)dma_buffer;
-        bdl[0].len = size;
-        bdl[0].flags = 1; /* IOC on last entry */
-    } else {
-        uint32_t half_size = size / 2;
-        bdl[0].addr = (uint64_t)dma_buffer;
-        bdl[0].len = half_size;
-        bdl[0].flags = 0;
-        
-        bdl[1].addr = (uint64_t)(dma_buffer + half_size);
-        bdl[1].len = size - half_size;
-        bdl[1].flags = 1; /* IOC on last entry */
-    }
-
-    /* Flush Data */
-    uint64_t start = (uint64_t)dma_buffer;
+/* Flush cache for DMA coherency */
+static void hda_flush_cache(void *addr, size_t size)
+{
+    uint64_t start = (uint64_t)addr;
     uint64_t end = start + size;
     uint64_t cache_line_size = 64;
     start = start & ~(cache_line_size - 1);
@@ -447,58 +417,113 @@ int intel_hda_play_pcm(const void *data, uint32_t samples, uint8_t channels, uin
 #elif defined(ARCH_X86_64) || defined(ARCH_X86)
     asm volatile("mfence" ::: "memory");
 #endif
+}
+
+int intel_hda_play_pcm(const void *data, uint32_t samples, uint8_t channels, uint32_t sample_rate) {
+    if (!hda_regs) return -1;
     
-    /* Flush BDL */
-    start = (uint64_t)bdl;
-    end = start + 256;
-    start = start & ~(cache_line_size - 1);
-    while (start < end) {
-#ifdef ARCH_ARM64
-        asm volatile("dc civac, %0" :: "r" (start));
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
-        asm volatile("clflush (%0)" :: "r"(start) : "memory");
-#endif
-        start += cache_line_size;
+    /* Initialize ring buffer on first use */
+    if (hda_init_ring_buffer() != 0) return -1;
+    
+    /* Calculate size in bytes (16-bit = 2 bytes) */
+    uint32_t size = samples * channels * 2;
+    
+    /* Limit to available ring buffer space */
+    uint32_t max_size = HDA_RING_BUFFER_SIZE / 2;  /* Don't fill more than half */
+    if (size > max_size) {
+        size = max_size;
+        samples = size / (channels * 2);
     }
-#ifdef ARCH_ARM64
-    asm volatile("dsb sy");
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
-    asm volatile("mfence" ::: "memory");
-#endif
     
-    /* 5. Program Stream Registers */
-    hda_write32(stream_base + HDA_SD_BDLPL, (uint32_t)(uint64_t)bdl);
-    hda_write32(stream_base + HDA_SD_BDLPU, (uint32_t)((uint64_t)bdl >> 32));
-    hda_write32(stream_base + HDA_SD_CBL, size);
-    hda_write16(stream_base + HDA_SD_LVI, (uint16_t)(bdl_entries - 1));
+    uint32_t ctl_offset = stream_base + HDA_SD_CTL;
     
-    /* Set Format: sample rate/channels */
-    uint16_t fmt = hda_build_format(sample_rate, channels, 16);
-    hda_write16(stream_base + HDA_SD_FMT, fmt);
+    /* If not already playing, initialize stream */
+    if (!audio_playing) {
+        /* 1. Reset Stream properly */
+        hda_write32(ctl_offset, 0); 
+        for(int timeout=0; timeout<1000; timeout++) {
+            if (!(hda_read32(ctl_offset) & HDA_SD_CTL_RUN)) break;
+        }
+        
+        /* Set SRST (Bit 0) and Wait */
+        hda_write32(ctl_offset, 1);
+        for(int timeout=0; timeout<1000; timeout++) {
+            if (hda_read32(ctl_offset) & 1) break;
+        }
+        
+        /* Clear SRST and Wait */
+        hda_write32(ctl_offset, 0);
+        for(int timeout=0; timeout<1000; timeout++) {
+            if (!(hda_read32(ctl_offset) & 1)) break;
+        }
+        
+        ring_write_pos = 0;
+    }
     
-    /* Codec Format Setup */
-    hda_write32(HDA_ICOI, 0x00220000 | fmt);
-    hda_write16(HDA_ICIS, 0x1);
-    for(int i=0; i<1000; i++) if(!(hda_read16(HDA_ICIS) & 1)) break;
-
-    /* 6. Start Stream */
-    hda_write32(HDA_SSYNC, 0);
-    hda_write8(stream_base + HDA_SD_STS, 0x1C);
-
-    /* Enable RUN */
-    hda_write32(ctl_offset, HDA_SD_CTL_RUN | ((uint32_t)hda_stream_tag << 20));
+    /* Copy data to ring buffer */
+    memcpy(dma_buffer + ring_write_pos, data, size);
+    ring_write_pos = (ring_write_pos + size) % HDA_RING_BUFFER_SIZE;
     
-    /* BLOCKING WAIT: Time Based */
-    /* Approx 0.5s wait to ensure sound is heard */
-    /* QEMU TCG can be varying speed, but 50M loops should be enough for "some" sound */
-    /* Better: Use kapi_get_uptime_ticks if available? No, this is kernel land driver. */
-    /* Just use a safe massive loop */
+    /* Flush data cache for DMA coherency */
+    hda_flush_cache(dma_buffer, HDA_RING_BUFFER_SIZE);
+    hda_flush_cache(bdl, HDA_RING_NUM_ENTRIES * sizeof(hda_bdl_entry_t));
     
-    for(volatile int w=0; w<50000000; w++);
+    if (!audio_playing) {
+        /* Enable Global Interrupts (GIE) */
+        hda_write32(HDA_INTCTL, 0x80000000 | 0x40000000);
+        
+        /* Program Stream Registers with ring buffer */
+        hda_write32(stream_base + HDA_SD_BDLPL, (uint32_t)(uint64_t)bdl);
+        hda_write32(stream_base + HDA_SD_BDLPU, (uint32_t)((uint64_t)bdl >> 32));
+        hda_write32(stream_base + HDA_SD_CBL, HDA_RING_BUFFER_SIZE);
+        hda_write16(stream_base + HDA_SD_LVI, (uint16_t)(HDA_RING_NUM_ENTRIES - 1));
+        
+        /* Set Format: sample rate/channels */
+        uint16_t fmt = hda_build_format(sample_rate, channels, 16);
+        hda_write16(stream_base + HDA_SD_FMT, fmt);
+        
+        /* Codec Format Setup */
+        hda_write32(HDA_ICOI, 0x00220000 | fmt);
+        hda_write16(HDA_ICIS, 0x1);
+        for(int i=0; i<1000; i++) if(!(hda_read16(HDA_ICIS) & 1)) break;
+        
+        /* Start Stream */
+        hda_write32(HDA_SSYNC, 0);
+        hda_write8(stream_base + HDA_SD_STS, 0x1C);
+        
+        /* Enable RUN with stream tag */
+        hda_write32(ctl_offset, HDA_SD_CTL_RUN | HDA_SD_CTL_IOCE | ((uint32_t)hda_stream_tag << 20));
+        
+        audio_playing = 1;
+        printk("HDA: Audio stream started (ring buffer mode)\n");
+    }
     
-    /* Stop Stream */
-    hda_write32(ctl_offset, 0);
-    hda_write32(ctl_offset, 0);
-
+    /* Calculate playback time based on sample rate */
+    uint32_t playback_ms = (samples * 1000) / sample_rate;
+    
+    /* Non-blocking wait: short delay to allow DMA to start, then return */
+    /* For truly async audio, we'd use interrupts. For now, brief wait. */
+    for(volatile int w = 0; w < (int)(playback_ms * 10000); w++);
+    
     return samples;
- }
+}
+
+/* Stop audio playback */
+void intel_hda_stop(void)
+{
+    if (!hda_regs || !audio_playing) return;
+    
+    uint32_t ctl_offset = stream_base + HDA_SD_CTL;
+    hda_write32(ctl_offset, 0);
+    audio_playing = 0;
+    ring_write_pos = 0;
+    ring_play_pos = 0;
+    
+    printk("HDA: Audio stream stopped\n");
+}
+
+/* Check if audio is currently playing */
+int intel_hda_is_playing(void)
+{
+    return audio_playing;
+}

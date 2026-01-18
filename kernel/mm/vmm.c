@@ -13,6 +13,12 @@
 /* Kernel page table (identity mapped initially) */
 static uint64_t kernel_pgd[VMM_ENTRIES] __aligned(PAGE_SIZE) = {0};
 
+/* Get kernel page table pointer */
+uint64_t *get_kernel_pgd(void)
+{
+    return kernel_pgd;
+}
+
 /* Pre-allocated page tables for early boot */
 #define EARLY_TABLES_COUNT  4
 static uint64_t early_tables[EARLY_TABLES_COUNT][VMM_ENTRIES] __aligned(PAGE_SIZE);
@@ -404,11 +410,156 @@ void vmm_destroy_address_space(struct mm_struct *mm)
         return;
     }
     
-    /* TODO: Free all user page tables */
-    /* TODO: Free all VMAs */
+    /* Free all VMAs */
+    struct vm_area *vma = mm->vma_list;
+    while (vma) {
+        struct vm_area *next = vma->next;
+        /* Note: Should use kfree but avoiding for now */
+        vma = next;
+    }
+    
+    /* TODO: Free all user page tables recursively */
+    /* For now, just clear the lower half */
+    if (mm->pgd) {
+        for (int i = 0; i < VMM_ENTRIES / 2; i++) {
+            mm->pgd[i] = 0;
+        }
+    }
     
     mm->pgd = NULL;
     mm->vma_list = NULL;
+}
+
+/* ===================================================================== */
+/* User Address Space Management */
+/* ===================================================================== */
+
+/* Map a page in user address space */
+int vmm_map_user_page(struct mm_struct *mm, virt_addr_t vaddr, phys_addr_t paddr, uint32_t flags)
+{
+    if (!mm || !mm->pgd) return -1;
+    
+    /* Ensure this is a user address */
+    if (vaddr >= USER_VMA_END) return -1;
+    
+    /* Save and switch page tables temporarily if needed */
+    uint64_t *saved_pgd = get_kernel_pgd();
+    
+    /* Use mm's page tables */
+    /* For simplicity, we manipulate the tables directly */
+    
+    /* Build page table indices */
+    int l0_idx = (vaddr >> VMM_LEVEL0_SHIFT) & (VMM_ENTRIES - 1);
+    int l1_idx = (vaddr >> VMM_LEVEL1_SHIFT) & (VMM_ENTRIES - 1);
+    int l2_idx = (vaddr >> VMM_LEVEL2_SHIFT) & (VMM_ENTRIES - 1);
+    int l3_idx = (vaddr >> VMM_LEVEL3_SHIFT) & (VMM_ENTRIES - 1);
+    
+    uint64_t *l0 = mm->pgd;
+    
+    /* Walk/create L1 */
+    if (!(l0[l0_idx] & PTE_VALID)) {
+        uint64_t *l1 = alloc_page_table();
+        if (!l1) return -1;
+        l0[l0_idx] = ((uint64_t)l1 & PTE_ADDR_MASK) | PTE_VALID | PTE_TABLE;
+    }
+    uint64_t *l1 = (uint64_t *)(l0[l0_idx] & PTE_ADDR_MASK);
+    
+    /* Walk/create L2 */
+    if (!(l1[l1_idx] & PTE_VALID)) {
+        uint64_t *l2 = alloc_page_table();
+        if (!l2) return -1;
+        l1[l1_idx] = ((uint64_t)l2 & PTE_ADDR_MASK) | PTE_VALID | PTE_TABLE;
+    }
+    uint64_t *l2 = (uint64_t *)(l1[l1_idx] & PTE_ADDR_MASK);
+    
+    /* Walk/create L3 */
+    if (!(l2[l2_idx] & PTE_VALID)) {
+        uint64_t *l3 = alloc_page_table();
+        if (!l3) return -1;
+        l2[l2_idx] = ((uint64_t)l3 & PTE_ADDR_MASK) | PTE_VALID | PTE_TABLE;
+    }
+    uint64_t *l3 = (uint64_t *)(l2[l2_idx] & PTE_ADDR_MASK);
+    
+    /* Convert VM flags to page table flags */
+    uint64_t pte_flags = PTE_VALID | PTE_PAGE | PTE_USER | PTE_ATTR_NORMAL | 
+                         PTE_SH_INNER | PTE_ACCESSED;
+    
+    if (!(flags & VM_WRITE)) pte_flags |= PTE_RDONLY;
+    if (!(flags & VM_EXEC)) pte_flags |= PTE_UXN;
+    pte_flags |= PTE_PXN;  /* Always disable privileged execute */
+    
+    /* Set the page */
+    l3[l3_idx] = (paddr & PTE_ADDR_MASK) | pte_flags;
+    
+    (void)saved_pgd;  /* Not used currently */
+    return 0;
+}
+
+/* Add a VM area to the address space */
+int vmm_add_vma(struct mm_struct *mm, virt_addr_t start, virt_addr_t end, uint32_t flags)
+{
+    if (!mm) return -1;
+    
+    /* Allocate VMA from static pool (should use kmalloc) */
+    static struct vm_area vma_pool[256];
+    static int vma_index = 0;
+    
+    if (vma_index >= 256) return -1;
+    
+    struct vm_area *vma = &vma_pool[vma_index++];
+    vma->start = start;
+    vma->end = end;
+    vma->flags = flags;
+    vma->next = mm->vma_list;
+    mm->vma_list = vma;
+    
+    mm->total_vm += (end - start);
+    
+    return 0;
+}
+
+/* Find a VM area containing an address */
+struct vm_area *vmm_find_vma(struct mm_struct *mm, virt_addr_t addr)
+{
+    if (!mm) return NULL;
+    
+    struct vm_area *vma = mm->vma_list;
+    while (vma) {
+        if (addr >= vma->start && addr < vma->end) {
+            return vma;
+        }
+        vma = vma->next;
+    }
+    return NULL;
+}
+
+/* Map user address range with physical pages */
+int vmm_map_user_range(struct mm_struct *mm, virt_addr_t vaddr, size_t size, uint32_t flags)
+{
+    if (!mm) return -1;
+    
+    virt_addr_t end = (vaddr + size + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1);
+    vaddr = vaddr & ~(PAGE_SIZE - 1);
+    
+    /* Add VMA */
+    vmm_add_vma(mm, vaddr, end, flags);
+    
+    /* Allocate and map pages */
+    for (virt_addr_t addr = vaddr; addr < end; addr += PAGE_SIZE) {
+        phys_addr_t paddr = pmm_alloc_page();
+        if (!paddr) {
+            printk(KERN_ERR "vmm_map_user_range: out of memory\n");
+            return -1;
+        }
+        
+        int ret = vmm_map_user_page(mm, addr, paddr, flags);
+        if (ret != 0) {
+            pmm_free_page(paddr);
+            return ret;
+        }
+    }
+    
+    return 0;
 }
 
 void vmm_switch_address_space(struct mm_struct *mm)

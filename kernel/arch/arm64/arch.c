@@ -13,6 +13,167 @@ extern uint64_t timer_get_count(void);
 extern uint64_t timer_get_frequency(void);
 
 /* ===================================================================== */
+/* SMP (Symmetric Multi-Processing) Support */
+/* ===================================================================== */
+
+#define MAX_CPUS 8
+
+/* Per-CPU data */
+struct cpu_data {
+    uint32_t cpu_id;
+    uint32_t online;
+    void *stack;
+    void (*entry)(void);
+};
+
+static struct cpu_data cpu_info[MAX_CPUS];
+static volatile uint32_t num_cpus_online = 1;  /* Boot CPU is online */
+static volatile uint32_t smp_initialized = 0;
+
+/* Spinlock for SMP synchronization */
+typedef struct {
+    volatile uint32_t lock;
+} spinlock_t;
+
+#define SPINLOCK_INIT { 0 }
+
+static inline void spin_lock(spinlock_t *lock)
+{
+    uint32_t tmp;
+    asm volatile(
+        "sevl\n"
+        "1: wfe\n"
+        "2: ldaxr %w0, [%1]\n"
+        "   cbnz %w0, 1b\n"
+        "   stxr %w0, %w2, [%1]\n"
+        "   cbnz %w0, 2b\n"
+        : "=&r" (tmp)
+        : "r" (&lock->lock), "r" (1)
+        : "memory"
+    );
+}
+
+static inline void spin_unlock(spinlock_t *lock)
+{
+    asm volatile("stlr wzr, [%0]" :: "r" (&lock->lock) : "memory");
+}
+
+/* Global kernel lock for SMP safety */
+static spinlock_t kernel_lock = SPINLOCK_INIT;
+
+void smp_lock(void)
+{
+    spin_lock(&kernel_lock);
+}
+
+void smp_unlock(void)
+{
+    spin_unlock(&kernel_lock);
+}
+
+/* Get current CPU ID */
+uint32_t smp_processor_id(void)
+{
+    uint64_t mpidr;
+    asm volatile("mrs %0, mpidr_el1" : "=r" (mpidr));
+    return mpidr & 0xFF;  /* Aff0 is the CPU ID on most systems */
+}
+
+/* Get number of online CPUs */
+uint32_t smp_num_cpus(void)
+{
+    return num_cpus_online;
+}
+
+/* Secondary CPU entry point (called from assembly) */
+void secondary_cpu_init(void)
+{
+    uint32_t cpu_id = smp_processor_id();
+    
+    printk(KERN_INFO "SMP: CPU %u coming online\n", cpu_id);
+    
+    /* Initialize GIC for this CPU */
+    gic_cpu_init();
+    
+    /* Mark CPU as online */
+    cpu_info[cpu_id].online = 1;
+    __atomic_add_fetch(&num_cpus_online, 1, __ATOMIC_SEQ_CST);
+    
+    /* Enable interrupts */
+    arch_irq_enable();
+    
+    printk(KERN_INFO "SMP: CPU %u online\n", cpu_id);
+    
+    /* Enter idle loop - wait for work */
+    while (1) {
+        asm volatile("wfe");  /* Wait for event */
+    }
+}
+
+/* Boot secondary CPUs (PSCI method for QEMU virt) */
+int smp_boot_secondary(uint32_t cpu_id, void (*entry)(void), void *stack)
+{
+    if (cpu_id >= MAX_CPUS || cpu_id == 0) return -1;
+    if (cpu_info[cpu_id].online) return 0;  /* Already online */
+    
+    cpu_info[cpu_id].cpu_id = cpu_id;
+    cpu_info[cpu_id].entry = entry;
+    cpu_info[cpu_id].stack = stack;
+    
+    /* Use PSCI CPU_ON to start the secondary CPU */
+    /* PSCI function IDs */
+    #define PSCI_CPU_ON_64 0xC4000003
+    
+    uint64_t target_cpu = cpu_id;
+    uint64_t entry_point = (uint64_t)entry;
+    uint64_t context_id = cpu_id;
+    int64_t ret;
+    
+    asm volatile(
+        "mov x0, %1\n"       /* PSCI function ID */
+        "mov x1, %2\n"       /* target CPU */
+        "mov x2, %3\n"       /* entry point */
+        "mov x3, %4\n"       /* context ID */
+        "hvc #0\n"           /* Hypervisor call */
+        "mov %0, x0\n"       /* Return value */
+        : "=r" (ret)
+        : "r" ((uint64_t)PSCI_CPU_ON_64), "r" (target_cpu), 
+          "r" (entry_point), "r" (context_id)
+        : "x0", "x1", "x2", "x3", "memory"
+    );
+    
+    if (ret == 0) {
+        printk(KERN_INFO "SMP: Booting CPU %u\n", cpu_id);
+        return 0;
+    } else {
+        printk(KERN_WARNING "SMP: Failed to boot CPU %u (PSCI error %lld)\n", 
+               cpu_id, (long long)ret);
+        return -1;
+    }
+}
+
+/* Initialize SMP subsystem */
+void smp_init(void)
+{
+    if (smp_initialized) return;
+    
+    printk(KERN_INFO "SMP: Initializing multiprocessor support\n");
+    
+    /* Initialize boot CPU info */
+    cpu_info[0].cpu_id = 0;
+    cpu_info[0].online = 1;
+    
+    smp_initialized = 1;
+    
+    printk(KERN_INFO "SMP: Boot CPU (CPU 0) initialized\n");
+    
+    /* Note: Secondary CPUs are not auto-booted.
+     * Call smp_boot_secondary() to start them when ready.
+     * For QEMU virt with -smp N, CPUs wait for PSCI CPU_ON.
+     */
+}
+
+/* ===================================================================== */
 /* Early Initialization */
 /* ===================================================================== */
 

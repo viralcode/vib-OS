@@ -194,6 +194,14 @@ void gic_init(void)
     printk(KERN_INFO "GIC: Initialization complete\n");
 }
 
+/* Initialize GIC for secondary CPUs (SMP support) */
+void gic_cpu_init(void)
+{
+    /* Each secondary CPU needs to initialize its redistributor and CPU interface */
+    gic_init_redistributor();
+    gic_init_cpu_interface();
+}
+
 /* ===================================================================== */
 /* IRQ management */
 /* ===================================================================== */

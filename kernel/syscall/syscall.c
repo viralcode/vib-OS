@@ -5,9 +5,74 @@
 #include "syscall/syscall.h"
 #include "sched/sched.h"
 #include "fs/vfs.h"
+#include "mm/kmalloc.h"
 #include "printk.h"
 #include "drivers/uart.h"
 #include "arch/arch.h"
+
+/* ===================================================================== */
+/* File Descriptor Table */
+/* ===================================================================== */
+
+#define MAX_FDS 256
+
+/* File descriptor entry */
+struct fd_entry {
+    struct file *file;
+    int flags;
+    int in_use;
+};
+
+/* Global FD table (per-process would be better, but simpler for now) */
+static struct fd_entry fd_table[MAX_FDS];
+static int fd_table_initialized = 0;
+
+static void init_fd_table(void)
+{
+    if (fd_table_initialized) return;
+    
+    for (int i = 0; i < MAX_FDS; i++) {
+        fd_table[i].file = NULL;
+        fd_table[i].flags = 0;
+        fd_table[i].in_use = 0;
+    }
+    
+    /* Reserve stdin/stdout/stderr */
+    fd_table[0].in_use = 1;  /* stdin */
+    fd_table[1].in_use = 1;  /* stdout */
+    fd_table[2].in_use = 1;  /* stderr */
+    
+    fd_table_initialized = 1;
+}
+
+static int alloc_fd(void)
+{
+    init_fd_table();
+    for (int i = 3; i < MAX_FDS; i++) {
+        if (!fd_table[i].in_use) {
+            fd_table[i].in_use = 1;
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void free_fd(int fd)
+{
+    if (fd >= 0 && fd < MAX_FDS) {
+        fd_table[fd].file = NULL;
+        fd_table[fd].flags = 0;
+        fd_table[fd].in_use = 0;
+    }
+}
+
+static struct file *get_file(int fd)
+{
+    if (fd < 0 || fd >= MAX_FDS || !fd_table[fd].in_use) {
+        return NULL;
+    }
+    return fd_table[fd].file;
+}
 
 /* ===================================================================== */
 /* System call table */
@@ -25,17 +90,27 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3, uin
 {
     (void)a3; (void)a4; (void)a5;
     
-    /* TODO: Get file from fd table */
-    (void)fd;
-    (void)buf;
-    (void)count;
+    init_fd_table();
     
-    return -ENOSYS;
+    /* Handle stdin specially */
+    if (fd == 0) {
+        /* For now, stdin is not supported */
+        return 0;
+    }
+    
+    struct file *f = get_file((int)fd);
+    if (!f) {
+        return -EBADF;
+    }
+    
+    return vfs_read(f, (char *)buf, count);
 }
 
 static long sys_write(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3, uint64_t a4, uint64_t a5)
 {
     (void)a3; (void)a4; (void)a5;
+    
+    init_fd_table();
     
     /* Special case: stdout/stderr (fd 1 and 2) go to console */
     if (fd == 1 || fd == 2) {
@@ -46,34 +121,77 @@ static long sys_write(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3, ui
         return count;
     }
     
-    return -EBADF;
+    struct file *f = get_file((int)fd);
+    if (!f) {
+        return -EBADF;
+    }
+    
+    return vfs_write(f, (const char *)buf, count);
 }
 
 static long sys_openat(uint64_t dirfd, uint64_t pathname, uint64_t flags, uint64_t mode, uint64_t a4, uint64_t a5)
 {
     (void)a4; (void)a5;
-    (void)dirfd;
+    (void)dirfd;  /* TODO: Handle relative paths with dirfd */
+    
+    init_fd_table();
     
     const char *path = (const char *)pathname;
     printk(KERN_DEBUG "sys_openat: '%s' flags=0x%llx mode=0%llo\n", path, (unsigned long long)flags, (unsigned long long)mode);
     
-    return -ENOSYS;
+    /* Allocate file descriptor */
+    int fd = alloc_fd();
+    if (fd < 0) {
+        return -EMFILE;  /* Too many open files */
+    }
+    
+    /* Open the file */
+    struct file *f = vfs_open(path, (int)flags, (mode_t)mode);
+    if (!f) {
+        free_fd(fd);
+        return -ENOENT;
+    }
+    
+    fd_table[fd].file = f;
+    fd_table[fd].flags = (int)flags;
+    
+    return fd;
 }
 
 static long sys_close(uint64_t fd, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)
 {
     (void)a1; (void)a2; (void)a3; (void)a4; (void)a5;
-    (void)fd;
     
-    return -ENOSYS;
+    init_fd_table();
+    
+    /* Don't close stdin/stdout/stderr */
+    if (fd < 3) {
+        return 0;
+    }
+    
+    struct file *f = get_file((int)fd);
+    if (!f) {
+        return -EBADF;
+    }
+    
+    vfs_close(f);
+    free_fd((int)fd);
+    
+    return 0;
 }
 
 static long sys_lseek(uint64_t fd, uint64_t offset, uint64_t whence, uint64_t a3, uint64_t a4, uint64_t a5)
 {
     (void)a3; (void)a4; (void)a5;
-    (void)fd; (void)offset; (void)whence;
     
-    return -ENOSYS;
+    init_fd_table();
+    
+    struct file *f = get_file((int)fd);
+    if (!f) {
+        return -EBADF;
+    }
+    
+    return vfs_lseek(f, (loff_t)offset, (int)whence);
 }
 
 static long sys_exit(uint64_t error_code, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)
@@ -210,16 +328,105 @@ static long sys_clone(uint64_t flags, uint64_t stack, uint64_t ptid, uint64_t tl
     return -ENOSYS;
 }
 
+/* Forward declarations for ELF loader */
+extern int elf_validate(const void *data, size_t size);
+extern uint64_t elf_calc_size(const void *data, size_t size);
+extern int elf_load_at(const void *data, size_t size, uint64_t load_base, void *info);
+
 static long sys_execve(uint64_t filename, uint64_t argv, uint64_t envp, uint64_t a3, uint64_t a4, uint64_t a5)
 {
-    (void)filename; (void)argv; (void)envp; (void)a3; (void)a4; (void)a5;
+    (void)argv; (void)envp; (void)a3; (void)a4; (void)a5;
     
     const char *path = (const char *)filename;
-    printk(KERN_DEBUG "sys_execve: '%s'\n", path);
+    printk(KERN_INFO "sys_execve: loading '%s'\n", path);
     
-    /* TODO: Implement program loading */
+    /* Open the file */
+    struct file *f = vfs_open(path, O_RDONLY, 0);
+    if (!f) {
+        printk(KERN_ERR "sys_execve: cannot open '%s'\n", path);
+        return -ENOENT;
+    }
     
-    return -ENOSYS;
+    /* Get file size via dentry->inode */
+    size_t file_size = 0;
+    if (f->f_dentry && f->f_dentry->d_inode) {
+        file_size = f->f_dentry->d_inode->i_size;
+    }
+    if (file_size == 0 || file_size > 64 * 1024 * 1024) {
+        vfs_close(f);
+        return -ENOEXEC;
+    }
+    
+    /* Allocate buffer and read file */
+    uint8_t *buf = kmalloc(file_size);
+    if (!buf) {
+        vfs_close(f);
+        return -ENOMEM;
+    }
+    
+    ssize_t bytes_read = vfs_read(f, (char *)buf, file_size);
+    vfs_close(f);
+    
+    if (bytes_read != (ssize_t)file_size) {
+        kfree(buf);
+        return -EIO;
+    }
+    
+    /* Validate ELF */
+    int ret = elf_validate(buf, file_size);
+    if (ret != 0) {
+        printk(KERN_ERR "sys_execve: invalid ELF (error %d)\n", ret);
+        kfree(buf);
+        return -ENOEXEC;
+    }
+    
+    /* Calculate memory needed */
+    uint64_t mem_size = elf_calc_size(buf, file_size);
+    if (mem_size == 0) {
+        kfree(buf);
+        return -ENOEXEC;
+    }
+    
+    /* Load at user code base */
+    typedef struct {
+        uint64_t entry;
+        uint64_t load_base;
+        uint64_t load_size;
+    } elf_load_info_t;
+    
+    elf_load_info_t info;
+    ret = elf_load_at(buf, file_size, USER_CODE_BASE, &info);
+    kfree(buf);
+    
+    if (ret != 0) {
+        printk(KERN_ERR "sys_execve: ELF load failed\n");
+        return -ENOEXEC;
+    }
+    
+    printk(KERN_INFO "sys_execve: loaded at 0x%llx, entry 0x%llx\n",
+           (unsigned long long)info.load_base, (unsigned long long)info.entry);
+    
+    /* Get current task and set up for userspace execution */
+    struct task_struct *current = get_current();
+    if (current) {
+        current->flags |= PF_USER;
+        current->flags &= ~PF_KTHREAD;
+        
+        /* Update task name */
+        int i = 0;
+        while (path[i] && i < TASK_COMM_LEN - 1) {
+            current->comm[i] = path[i];
+            i++;
+        }
+        current->comm[i] = '\0';
+    }
+    
+    /* TODO: Set up user stack, argc/argv/envp on stack */
+    /* TODO: Switch to user page tables */
+    /* TODO: Return to userspace entry point (requires eret to EL0) */
+    
+    /* For now, return entry point - caller would need to jump there */
+    return info.entry;
 }
 
 static long sys_uname(uint64_t buf, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)

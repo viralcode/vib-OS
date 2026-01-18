@@ -125,6 +125,10 @@ struct arp_entry {
 
 static struct arp_entry arp_cache[ARP_CACHE_SIZE];
 
+/* Forward declarations */
+static void arp_add(uint32_t ip, uint8_t *mac);
+static struct arp_entry *arp_lookup(uint32_t ip);
+
 /* ===================================================================== */
 /* Network Interface Globals */
 /* ===================================================================== */
@@ -137,6 +141,105 @@ static int num_interfaces = 0;
 /* RX Handler */
 /* ===================================================================== */
 
+/* Forward declaration */
+void tcp_handle_segment(uint32_t src_ip, uint32_t dst_ip,
+                        struct tcp_hdr *tcp, size_t tcp_len);
+
+/* Handle incoming ARP packets */
+static void arp_handle(struct net_interface *iface, struct arp_hdr *arp)
+{
+    uint16_t opcode = ntohs(arp->opcode);
+    
+    if (opcode == 1) {
+        /* ARP Request - check if it's for us */
+        if (arp->target_ip == iface->ip) {
+            printk(KERN_DEBUG "ARP: Request for our IP, sending reply\n");
+            
+            /* Build ARP reply */
+            uint8_t packet[ETH_HLEN + sizeof(struct arp_hdr)];
+            struct eth_hdr *eth = (struct eth_hdr *)packet;
+            struct arp_hdr *reply = (struct arp_hdr *)(packet + ETH_HLEN);
+            
+            /* Ethernet header */
+            for (int i = 0; i < ETH_ALEN; i++) {
+                eth->dest[i] = arp->sender_mac[i];
+                eth->src[i] = iface->mac[i];
+            }
+            eth->type = htons(ETH_P_ARP);
+            
+            /* ARP reply */
+            reply->hw_type = htons(1);
+            reply->proto_type = htons(ETH_P_IP);
+            reply->hw_len = ETH_ALEN;
+            reply->proto_len = 4;
+            reply->opcode = htons(2);  /* Reply */
+            for (int i = 0; i < ETH_ALEN; i++) {
+                reply->sender_mac[i] = iface->mac[i];
+                reply->target_mac[i] = arp->sender_mac[i];
+            }
+            reply->sender_ip = iface->ip;
+            reply->target_ip = arp->sender_ip;
+            
+            if (iface->send) {
+                iface->send(iface, packet, sizeof(packet));
+            }
+        }
+    } else if (opcode == 2) {
+        /* ARP Reply - add to cache */
+        arp_add(arp->sender_ip, arp->sender_mac);
+        printk(KERN_DEBUG "ARP: Added entry for IP\n");
+    }
+}
+
+/* Handle incoming IP packets */
+static void ip_handle(struct net_interface *iface, struct ip_hdr *ip, size_t len)
+{
+    (void)iface;
+    
+    /* Verify header */
+    if ((ip->version_ihl >> 4) != 4) return;  /* Not IPv4 */
+    
+    size_t ip_hlen = (ip->version_ihl & 0xF) * 4;
+    size_t total_len = ntohs(ip->total_len);
+    
+    if (len < total_len) return;  /* Truncated packet */
+    
+    uint8_t *payload = (uint8_t *)ip + ip_hlen;
+    size_t payload_len = total_len - ip_hlen;
+    
+    switch (ip->protocol) {
+        case IP_PROTO_ICMP:
+            /* Handle ICMP - echo reply etc */
+            {
+                struct icmp_hdr *icmp = (struct icmp_hdr *)payload;
+                if (icmp->type == 0) {
+                    /* Echo reply */
+                    printk(KERN_INFO "ICMP: Received echo reply seq=%u\n", ntohs(icmp->seq));
+                } else if (icmp->type == 8) {
+                    /* Echo request - send reply */
+                    printk(KERN_DEBUG "ICMP: Received echo request, sending reply\n");
+                    /* TODO: Send ICMP echo reply */
+                }
+            }
+            break;
+            
+        case IP_PROTO_TCP:
+            {
+                struct tcp_hdr *tcp = (struct tcp_hdr *)payload;
+                tcp_handle_segment(ip->src_ip, ip->dst_ip, tcp, payload_len);
+            }
+            break;
+            
+        case IP_PROTO_UDP:
+            /* Handle UDP */
+            printk(KERN_DEBUG "UDP: Received packet\n");
+            break;
+            
+        default:
+            break;
+    }
+}
+
 void net_rx(struct net_interface *iface, const void *data, size_t len)
 {
     if (len < sizeof(struct eth_hdr)) return;
@@ -147,11 +250,26 @@ void net_rx(struct net_interface *iface, const void *data, size_t len)
     iface->rx_packets++;
     iface->rx_bytes += len;
     
-    /* TODO: Handle packet types */
-    /* if (type == ETH_P_ARP) arp_handle(...) */
-    /* if (type == ETH_P_IP) ip_handle(...) */
+    uint8_t *payload = (uint8_t *)data + ETH_HLEN;
+    size_t payload_len = len - ETH_HLEN;
     
-    // printk(KERN_DEBUG "NET: Received %zu bytes, type=0x%04x\n", len, type);
+    switch (type) {
+        case ETH_P_ARP:
+            if (payload_len >= sizeof(struct arp_hdr)) {
+                arp_handle(iface, (struct arp_hdr *)payload);
+            }
+            break;
+            
+        case ETH_P_IP:
+            if (payload_len >= sizeof(struct ip_hdr)) {
+                ip_handle(iface, (struct ip_hdr *)payload, payload_len);
+            }
+            break;
+            
+        default:
+            /* Unknown protocol */
+            break;
+    }
 }
 
 
@@ -419,26 +537,121 @@ static void tcp_free_connection(struct tcp_connection *conn)
     conn->in_use = false;
 }
 
+/* Build and send a TCP packet */
+static int tcp_send_packet(struct tcp_connection *conn, uint8_t flags, 
+                           const void *data, size_t data_len)
+{
+    if (num_interfaces == 0) return -1;
+    struct net_interface *iface = &interfaces[0];
+    
+    size_t tcp_len = sizeof(struct tcp_hdr) + data_len;
+    size_t total_len = ETH_HLEN + sizeof(struct ip_hdr) + tcp_len;
+    
+    uint8_t *packet = kmalloc(total_len);
+    if (!packet) return -1;
+    
+    struct eth_hdr *eth = (struct eth_hdr *)packet;
+    struct ip_hdr *ip = (struct ip_hdr *)(packet + ETH_HLEN);
+    struct tcp_hdr *tcp = (struct tcp_hdr *)(packet + ETH_HLEN + sizeof(struct ip_hdr));
+    uint8_t *payload = (uint8_t *)tcp + sizeof(struct tcp_hdr);
+    
+    /* Ethernet header */
+    eth->type = htons(ETH_P_IP);
+    for (int i = 0; i < ETH_ALEN; i++) {
+        eth->src[i] = iface->mac[i];
+        eth->dest[i] = 0xFF; /* TODO: ARP lookup for real dest MAC */
+    }
+    
+    /* IP header */
+    ip->version_ihl = 0x45;
+    ip->tos = 0;
+    ip->total_len = htons(sizeof(struct ip_hdr) + tcp_len);
+    ip->id = htons(conn->seq & 0xFFFF);
+    ip->flags_frag = htons(0x4000); /* Don't fragment */
+    ip->ttl = 64;
+    ip->protocol = IP_PROTO_TCP;
+    ip->src_ip = conn->local_ip;
+    ip->dst_ip = conn->remote_ip;
+    ip->checksum = 0;
+    ip->checksum = checksum(ip, sizeof(struct ip_hdr));
+    
+    /* TCP header */
+    tcp->src_port = htons(conn->local_port);
+    tcp->dst_port = htons(conn->remote_port);
+    tcp->seq = htonl(conn->seq);
+    tcp->ack = htonl(conn->ack);
+    tcp->data_offset = (sizeof(struct tcp_hdr) / 4) << 4;
+    tcp->flags = flags;
+    tcp->window = htons(conn->recv_wnd);
+    tcp->urgent = 0;
+    tcp->checksum = 0;
+    
+    /* Copy payload data */
+    if (data && data_len > 0) {
+        for (size_t i = 0; i < data_len; i++) {
+            payload[i] = ((const uint8_t *)data)[i];
+        }
+    }
+    
+    /* Calculate TCP checksum */
+    tcp->checksum = tcp_checksum(ip, tcp, tcp_len);
+    
+    /* Send via driver */
+    if (iface->send) {
+        iface->send(iface, packet, total_len);
+        iface->tx_packets++;
+        iface->tx_bytes += total_len;
+    }
+    
+    kfree(packet);
+    return 0;
+}
+
+/* Simple pseudo-random number generator for initial sequence numbers */
+static uint32_t tcp_isn_counter = 0x12345678;
+static uint32_t tcp_generate_isn(void)
+{
+    tcp_isn_counter = tcp_isn_counter * 1103515245 + 12345;
+    return tcp_isn_counter;
+}
+
 int tcp_connect(uint32_t dest_ip, uint16_t dest_port)
 {
     struct tcp_connection *conn = tcp_alloc_connection();
     if (!conn) return -1;
     
+    if (num_interfaces == 0) {
+        tcp_free_connection(conn);
+        return -1;
+    }
+    
     struct net_interface *iface = &interfaces[0];
     
     conn->local_ip = iface->ip;
     conn->local_port = next_ephemeral_port++;
+    if (next_ephemeral_port > 65000) next_ephemeral_port = 49152;
+    
     conn->remote_ip = dest_ip;
     conn->remote_port = dest_port;
-    conn->seq = 12345;  /* TODO: random */
+    conn->seq = tcp_generate_isn();
+    conn->ack = 0;
     conn->state = TCP_SYN_SENT;
     
-    /* Send SYN */
-    printk(KERN_DEBUG "TCP: Sending SYN to port %u\n", dest_port);
+    /* Send SYN packet */
+    printk(KERN_INFO "TCP: Connecting to %d.%d.%d.%d:%u (seq=%u)\n",
+           (dest_ip >> 24) & 0xFF, (dest_ip >> 16) & 0xFF,
+           (dest_ip >> 8) & 0xFF, dest_ip & 0xFF, dest_port, conn->seq);
     
-    /* TODO: Build and send SYN packet */
+    int ret = tcp_send_packet(conn, TCP_SYN, NULL, 0);
+    if (ret < 0) {
+        tcp_free_connection(conn);
+        return -1;
+    }
     
-    return 0;
+    conn->seq++; /* SYN consumes one sequence number */
+    
+    /* Return connection index for tracking */
+    return (int)(conn - tcp_connections);
 }
 
 int tcp_send(struct tcp_connection *conn, const void *data, size_t len)
@@ -454,9 +667,13 @@ int tcp_send(struct tcp_connection *conn, const void *data, size_t len)
         conn->send_buf[conn->send_len++] = ((uint8_t *)data)[i];
     }
     
-    /* TODO: Actually send data */
+    /* Send data with PSH+ACK flags */
+    int ret = tcp_send_packet(conn, TCP_PSH | TCP_ACK, data, len);
+    if (ret == 0) {
+        conn->seq += len;
+    }
     
-    return len;
+    return ret == 0 ? (int)len : -1;
 }
 
 int tcp_recv(struct tcp_connection *conn, void *data, size_t len)
@@ -480,13 +697,168 @@ int tcp_recv(struct tcp_connection *conn, void *data, size_t len)
 
 int tcp_close(struct tcp_connection *conn)
 {
-    if (conn->state == TCP_ESTABLISHED) {
-        conn->state = TCP_FIN_WAIT_1;
-        /* TODO: Send FIN */
+    if (!conn || !conn->in_use) return -1;
+    
+    switch (conn->state) {
+        case TCP_ESTABLISHED:
+            /* Active close - send FIN */
+            conn->state = TCP_FIN_WAIT_1;
+            tcp_send_packet(conn, TCP_FIN | TCP_ACK, NULL, 0);
+            conn->seq++;  /* FIN consumes one sequence number */
+            printk(KERN_DEBUG "TCP: Sent FIN, entering FIN_WAIT_1\n");
+            break;
+            
+        case TCP_CLOSE_WAIT:
+            /* Passive close - send FIN */
+            conn->state = TCP_LAST_ACK;
+            tcp_send_packet(conn, TCP_FIN | TCP_ACK, NULL, 0);
+            conn->seq++;
+            printk(KERN_DEBUG "TCP: Sent FIN, entering LAST_ACK\n");
+            break;
+            
+        case TCP_SYN_SENT:
+        case TCP_LISTEN:
+            /* Just close immediately */
+            tcp_free_connection(conn);
+            return 0;
+            
+        default:
+            /* Already closing */
+            break;
     }
     
-    tcp_free_connection(conn);
+    /* Don't free immediately - wait for state machine to complete */
     return 0;
+}
+
+/* Find a connection by remote IP/port */
+static struct tcp_connection *tcp_find_connection(uint32_t remote_ip, uint16_t remote_port,
+                                                   uint32_t local_ip, uint16_t local_port)
+{
+    for (int i = 0; i < MAX_TCP_CONNECTIONS; i++) {
+        struct tcp_connection *c = &tcp_connections[i];
+        if (c->in_use &&
+            c->remote_ip == remote_ip && c->remote_port == remote_port &&
+            c->local_ip == local_ip && c->local_port == local_port) {
+            return c;
+        }
+    }
+    return NULL;
+}
+
+/* Handle incoming TCP segment - called from IP layer */
+void tcp_handle_segment(uint32_t src_ip, uint32_t dst_ip,
+                        struct tcp_hdr *tcp, size_t tcp_len)
+{
+    uint16_t src_port = ntohs(tcp->src_port);
+    uint16_t dst_port = ntohs(tcp->dst_port);
+    uint32_t seq = ntohl(tcp->seq);
+    uint32_t ack = ntohl(tcp->ack);
+    uint8_t flags = tcp->flags;
+    
+    struct tcp_connection *conn = tcp_find_connection(src_ip, src_port, dst_ip, dst_port);
+    
+    if (!conn) {
+        /* No connection - send RST if not a RST */
+        if (!(flags & TCP_RST)) {
+            printk(KERN_DEBUG "TCP: No connection for port %u, would send RST\n", dst_port);
+        }
+        return;
+    }
+    
+    size_t header_len = ((tcp->data_offset >> 4) & 0xF) * 4;
+    size_t data_len = tcp_len - header_len;
+    uint8_t *data = (uint8_t *)tcp + header_len;
+    
+    /* TCP State Machine */
+    switch (conn->state) {
+        case TCP_SYN_SENT:
+            /* Expecting SYN+ACK */
+            if ((flags & (TCP_SYN | TCP_ACK)) == (TCP_SYN | TCP_ACK)) {
+                conn->ack = seq + 1;
+                conn->state = TCP_ESTABLISHED;
+                /* Send ACK */
+                tcp_send_packet(conn, TCP_ACK, NULL, 0);
+                printk(KERN_INFO "TCP: Connection established!\n");
+            } else if (flags & TCP_RST) {
+                printk(KERN_INFO "TCP: Connection refused (RST)\n");
+                conn->state = TCP_CLOSED;
+                tcp_free_connection(conn);
+            }
+            break;
+            
+        case TCP_ESTABLISHED:
+            /* Handle incoming data */
+            if (flags & TCP_FIN) {
+                /* Remote is closing */
+                conn->ack = seq + data_len + 1;
+                conn->state = TCP_CLOSE_WAIT;
+                tcp_send_packet(conn, TCP_ACK, NULL, 0);
+                printk(KERN_DEBUG "TCP: Received FIN, entering CLOSE_WAIT\n");
+            } else if (data_len > 0) {
+                /* Received data */
+                if (conn->recv_len + data_len <= conn->recv_capacity) {
+                    for (size_t i = 0; i < data_len; i++) {
+                        conn->recv_buf[conn->recv_len++] = data[i];
+                    }
+                    conn->ack = seq + data_len;
+                    /* Send ACK */
+                    tcp_send_packet(conn, TCP_ACK, NULL, 0);
+                }
+            } else if (flags & TCP_ACK) {
+                /* ACK for our data */
+                /* Update send window, remove acknowledged data from send buffer */
+            }
+            break;
+            
+        case TCP_FIN_WAIT_1:
+            if (flags & TCP_ACK) {
+                conn->state = TCP_FIN_WAIT_2;
+                printk(KERN_DEBUG "TCP: Entering FIN_WAIT_2\n");
+            }
+            if (flags & TCP_FIN) {
+                conn->ack = seq + 1;
+                tcp_send_packet(conn, TCP_ACK, NULL, 0);
+                if (conn->state == TCP_FIN_WAIT_2) {
+                    conn->state = TCP_TIME_WAIT;
+                    printk(KERN_DEBUG "TCP: Entering TIME_WAIT\n");
+                } else {
+                    conn->state = TCP_CLOSING;
+                }
+            }
+            break;
+            
+        case TCP_FIN_WAIT_2:
+            if (flags & TCP_FIN) {
+                conn->ack = seq + 1;
+                tcp_send_packet(conn, TCP_ACK, NULL, 0);
+                conn->state = TCP_TIME_WAIT;
+                printk(KERN_DEBUG "TCP: Entering TIME_WAIT\n");
+            }
+            break;
+            
+        case TCP_CLOSING:
+            if (flags & TCP_ACK) {
+                conn->state = TCP_TIME_WAIT;
+            }
+            break;
+            
+        case TCP_LAST_ACK:
+            if (flags & TCP_ACK) {
+                conn->state = TCP_CLOSED;
+                tcp_free_connection(conn);
+                printk(KERN_DEBUG "TCP: Connection closed\n");
+            }
+            break;
+            
+        case TCP_TIME_WAIT:
+            /* Should wait 2*MSL then free - for now just free */
+            tcp_free_connection(conn);
+            break;
+            
+        default:
+            break;
+    }
 }
 
 /* ===================================================================== */
