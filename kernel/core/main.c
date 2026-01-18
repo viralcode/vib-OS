@@ -152,6 +152,11 @@ static void init_subsystems(void *dtb)
     printk(KERN_INFO "  Initializing scheduler...\n");
     sched_init();
     
+    /* Initialize SMP (multiprocessor support) */
+    printk(KERN_INFO "  Initializing SMP...\n");
+    extern void smp_init(void);
+    smp_init();
+    
     /* Initialize process subsystem */
     printk(KERN_INFO "  Initializing process subsystem...\n");
     extern void process_init(void);
