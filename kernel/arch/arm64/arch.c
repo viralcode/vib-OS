@@ -174,6 +174,96 @@ void smp_init(void)
 }
 
 /* ===================================================================== */
+/* Userspace Entry */
+/* ===================================================================== */
+
+/**
+ * arch_enter_userspace - Jump to userspace execution (EL0)
+ * @entry: Entry point address in userspace
+ * @sp: User stack pointer
+ * @argc: Argument count (passed in x0)
+ * @argv: Argument vector pointer (passed in x1)
+ *
+ * This function sets up the CPU state to execute at EL0 (userspace)
+ * and uses ERET to jump there. It does not return.
+ */
+void arch_enter_userspace(uint64_t entry, uint64_t sp, uint64_t argc, uint64_t argv)
+{
+    printk(KERN_INFO "ARM64: Entering userspace at 0x%llx, sp=0x%llx\n",
+           (unsigned long long)entry, (unsigned long long)sp);
+    
+    /*
+     * Set up SPSR_EL1 for EL0:
+     * - M[3:0] = 0b0000 (EL0t - EL0 with SP_EL0)
+     * - DAIF cleared (interrupts enabled)
+     * - NZCV = 0
+     */
+    uint64_t spsr = 0; /* EL0t mode, interrupts enabled */
+    
+    asm volatile(
+        /* Set ELR_EL1 to user entry point */
+        "msr elr_el1, %[entry]\n"
+        
+        /* Set SPSR_EL1 for EL0 execution */
+        "msr spsr_el1, %[spsr]\n"
+        
+        /* Set SP_EL0 (user stack pointer) */
+        "msr sp_el0, %[sp]\n"
+        
+        /* Set up arguments in x0, x1 */
+        "mov x0, %[argc]\n"
+        "mov x1, %[argv]\n"
+        
+        /* Clear other general-purpose registers for security */
+        "mov x2, #0\n"
+        "mov x3, #0\n"
+        "mov x4, #0\n"
+        "mov x5, #0\n"
+        "mov x6, #0\n"
+        "mov x7, #0\n"
+        "mov x8, #0\n"
+        "mov x9, #0\n"
+        "mov x10, #0\n"
+        "mov x11, #0\n"
+        "mov x12, #0\n"
+        "mov x13, #0\n"
+        "mov x14, #0\n"
+        "mov x15, #0\n"
+        "mov x16, #0\n"
+        "mov x17, #0\n"
+        "mov x18, #0\n"
+        "mov x19, #0\n"
+        "mov x20, #0\n"
+        "mov x21, #0\n"
+        "mov x22, #0\n"
+        "mov x23, #0\n"
+        "mov x24, #0\n"
+        "mov x25, #0\n"
+        "mov x26, #0\n"
+        "mov x27, #0\n"
+        "mov x28, #0\n"
+        "mov x29, #0\n"  /* Frame pointer */
+        "mov x30, #0\n"  /* Link register */
+        
+        /* Ensure all changes take effect */
+        "isb\n"
+        
+        /* Jump to userspace */
+        "eret\n"
+        :
+        : [entry] "r" (entry),
+          [sp] "r" (sp),
+          [spsr] "r" (spsr),
+          [argc] "r" (argc),
+          [argv] "r" (argv)
+        : "memory"
+    );
+    
+    /* Should never reach here */
+    __builtin_unreachable();
+}
+
+/* ===================================================================== */
 /* Early Initialization */
 /* ===================================================================== */
 

@@ -358,11 +358,43 @@ extern int elf_validate(const void *data, size_t size);
 extern uint64_t elf_calc_size(const void *data, size_t size);
 extern int elf_load_at(const void *data, size_t size, uint64_t load_base, void *info);
 
+/* Architecture-specific function to jump to userspace */
+extern void arch_enter_userspace(uint64_t entry, uint64_t sp, uint64_t argc, uint64_t argv);
+
+/* Helper: copy string to user stack and return new stack pointer */
+static uint64_t push_string_to_stack(uint64_t sp, const char *str)
+{
+    size_t len = 0;
+    while (str[len]) len++;
+    len++; /* Include null terminator */
+    
+    sp -= len;
+    sp &= ~7ULL; /* 8-byte align */
+    
+    char *dest = (char *)sp;
+    for (size_t i = 0; i < len; i++) {
+        dest[i] = str[i];
+    }
+    return sp;
+}
+
+/* Helper: count strings in NULL-terminated array */
+static int count_strings(char **arr)
+{
+    if (!arr) return 0;
+    int count = 0;
+    while (arr[count]) count++;
+    return count;
+}
+
 static long sys_execve(uint64_t filename, uint64_t argv, uint64_t envp, uint64_t a3, uint64_t a4, uint64_t a5)
 {
-    (void)argv; (void)envp; (void)a3; (void)a4; (void)a5;
+    (void)a3; (void)a4; (void)a5;
     
     const char *path = (const char *)filename;
+    char **user_argv = (char **)argv;
+    char **user_envp = (char **)envp;
+    
     printk(KERN_INFO "sys_execve: loading '%s'\n", path);
     
     /* Open the file */
@@ -433,25 +465,129 @@ static long sys_execve(uint64_t filename, uint64_t argv, uint64_t envp, uint64_t
     
     /* Get current task and set up for userspace execution */
     struct task_struct *current = get_current();
-    if (current) {
-        current->flags |= PF_USER;
-        current->flags &= ~PF_KTHREAD;
-        
-        /* Update task name */
-        int i = 0;
-        while (path[i] && i < TASK_COMM_LEN - 1) {
-            current->comm[i] = path[i];
-            i++;
-        }
-        current->comm[i] = '\0';
+    if (!current) {
+        return -ESRCH;
     }
     
-    /* TODO: Set up user stack, argc/argv/envp on stack */
-    /* TODO: Switch to user page tables */
-    /* TODO: Return to userspace entry point (requires eret to EL0) */
+    current->flags |= PF_USER;
+    current->flags &= ~PF_KTHREAD;
     
-    /* For now, return entry point - caller would need to jump there */
-    return info.entry;
+    /* Update task name (extract basename from path) */
+    const char *basename = path;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/') basename = p + 1;
+    }
+    int i = 0;
+    while (basename[i] && i < TASK_COMM_LEN - 1) {
+        current->comm[i] = basename[i];
+        i++;
+    }
+    current->comm[i] = '\0';
+    
+    /* Set up user stack */
+    uint64_t user_sp = USER_STACK_TOP;
+    
+    /* Count argc and envp */
+    int argc = count_strings(user_argv);
+    int envc = count_strings(user_envp);
+    
+    /* Allocate space for string pointers on stack */
+    /* Stack layout (grows down):
+     *   [strings...]      - actual string data
+     *   NULL              - end of envp
+     *   envp[envc-1]      - environment pointers
+     *   ...
+     *   envp[0]
+     *   NULL              - end of argv
+     *   argv[argc-1]      - argument pointers
+     *   ...
+     *   argv[0]
+     *   argc              - argument count
+     *   <- SP points here
+     */
+    
+    /* Push environment strings and collect pointers */
+    uint64_t env_ptrs[64]; /* Max 64 env vars */
+    for (int j = envc - 1; j >= 0; j--) {
+        user_sp = push_string_to_stack(user_sp, user_envp[j]);
+        env_ptrs[j] = user_sp;
+    }
+    
+    /* Push argument strings and collect pointers */
+    uint64_t arg_ptrs[64]; /* Max 64 args */
+    for (int j = argc - 1; j >= 0; j--) {
+        user_sp = push_string_to_stack(user_sp, user_argv[j]);
+        arg_ptrs[j] = user_sp;
+    }
+    
+    /* If no argv provided, use path as argv[0] */
+    if (argc == 0) {
+        user_sp = push_string_to_stack(user_sp, path);
+        arg_ptrs[0] = user_sp;
+        argc = 1;
+    }
+    
+    /* Align stack to 16 bytes */
+    user_sp &= ~15ULL;
+    
+    /* Push NULL terminator for envp */
+    user_sp -= 8;
+    *(uint64_t *)user_sp = 0;
+    
+    /* Push envp pointers */
+    for (int j = envc - 1; j >= 0; j--) {
+        user_sp -= 8;
+        *(uint64_t *)user_sp = env_ptrs[j];
+    }
+    uint64_t envp_start = user_sp;
+    
+    /* Push NULL terminator for argv */
+    user_sp -= 8;
+    *(uint64_t *)user_sp = 0;
+    
+    /* Push argv pointers */
+    for (int j = argc - 1; j >= 0; j--) {
+        user_sp -= 8;
+        *(uint64_t *)user_sp = arg_ptrs[j];
+    }
+    uint64_t argv_start = user_sp;
+    
+    /* Push argc */
+    user_sp -= 8;
+    *(uint64_t *)user_sp = argc;
+    
+    /* Final 16-byte alignment for ABI compliance */
+    user_sp &= ~15ULL;
+    
+    printk(KERN_INFO "sys_execve: user stack at 0x%llx, argc=%d\n",
+           (unsigned long long)user_sp, argc);
+    
+    /* Set up mm_struct for user address space if not present */
+    if (!current->mm) {
+        current->mm = kmalloc(sizeof(struct mm_struct));
+        if (current->mm) {
+            current->mm->pgd = NULL; /* Use kernel page tables for now */
+            current->mm->start_code = info.load_base;
+            current->mm->end_code = info.load_base + info.load_size;
+            current->mm->start_data = 0;
+            current->mm->end_data = 0;
+            current->mm->start_brk = USER_HEAP_BASE;
+            current->mm->brk = USER_HEAP_BASE;
+            current->mm->start_stack = user_sp;
+            current->mm->arg_start = argv_start;
+            current->mm->arg_end = envp_start;
+            current->mm->env_start = envp_start;
+            current->mm->env_end = USER_STACK_TOP;
+            atomic_set(&current->mm->users, 1);
+            current->active_mm = current->mm;
+        }
+    }
+    
+    /* Jump to userspace - this function does not return on success */
+    arch_enter_userspace(info.entry, user_sp, argc, argv_start);
+    
+    /* Should not reach here */
+    return -EFAULT;
 }
 
 static long sys_uname(uint64_t buf, uint64_t a1, uint64_t a2, uint64_t a3, uint64_t a4, uint64_t a5)

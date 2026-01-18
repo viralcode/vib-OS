@@ -109,6 +109,27 @@ struct mm_struct {
     struct vm_area *vma_list;   /* VM areas */
     size_t total_vm;            /* Total mapped size */
     atomic_t users;             /* Reference count */
+    
+    /* Code segment */
+    uint64_t start_code;        /* Start of text segment */
+    uint64_t end_code;          /* End of text segment */
+    
+    /* Data segment */
+    uint64_t start_data;        /* Start of data segment */
+    uint64_t end_data;          /* End of data segment */
+    
+    /* Heap (brk) */
+    uint64_t start_brk;         /* Start of heap */
+    uint64_t brk;               /* Current program break */
+    
+    /* Stack */
+    uint64_t start_stack;       /* Start of user stack */
+    
+    /* Arguments and environment */
+    uint64_t arg_start;         /* Start of arguments */
+    uint64_t arg_end;           /* End of arguments */
+    uint64_t env_start;         /* Start of environment */
+    uint64_t env_end;           /* End of environment */
 };
 
 /* ===================================================================== */
