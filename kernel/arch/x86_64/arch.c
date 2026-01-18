@@ -226,6 +226,17 @@ uint32_t arch_cpu_count(void)
     return 1;
 }
 
+/* ===================================================================== */
+/* SMP (Symmetric Multi-Processing) */
+/* ===================================================================== */
+
+void smp_init(void)
+{
+    printk(KERN_INFO "SMP: Initializing multiprocessor support (x86_64)\n");
+    printk(KERN_INFO "SMP: Boot CPU (CPU 0) initialized\n");
+    /* TODO: Parse ACPI MADT, send INIT/SIPI to APs */
+}
+
 void arch_cpu_info(char *buf, size_t size)
 {
     /* Use CPUID to get CPU info */
