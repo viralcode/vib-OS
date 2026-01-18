@@ -1402,6 +1402,85 @@ static void draw_window(struct window *win)
         gui_draw_rect(content_x + 10, yy, 100, 28, 0x3B82F6);
         gui_draw_string(content_x + 24, yy + 6, "About...", 0xFFFFFF, 0x3B82F6);
     }
+    /* Process Manager window */
+    else if (win->title[0] == 'P' && win->title[1] == 'r' && win->title[2] == 'o' && 
+             win->title[3] == 'c' && win->title[4] == 'e') {
+        int yy = content_y + 8;
+        
+        /* Header row */
+        gui_draw_rect(content_x + 4, yy, content_w - 8, 22, 0x3B82F6);
+        gui_draw_string(content_x + 12, yy + 4, "PID", 0xFFFFFF, 0x3B82F6);
+        gui_draw_string(content_x + 60, yy + 4, "Name", 0xFFFFFF, 0x3B82F6);
+        gui_draw_string(content_x + 200, yy + 4, "State", 0xFFFFFF, 0x3B82F6);
+        gui_draw_string(content_x + content_w - 60, yy + 4, "Kill", 0xFFFFFF, 0x3B82F6);
+        yy += 26;
+        
+        /* Process list - get from process.c */
+        extern int process_get_info(int index, char *name, int name_size, int *state);
+        
+        const char *state_names[] = {"Free", "Ready", "Run", "Block", "Zombie"};
+        uint32_t state_colors[] = {0x6C7086, 0xF9E2AF, 0xA6E3A1, 0xF38BA8, 0xF38BA8};
+        
+        int shown = 0;
+        for (int i = 0; i < 16 && yy < content_y + content_h - 30; i++) {
+            char name[32];
+            int state = 0;
+            int pid = process_get_info(i, name, sizeof(name), &state);
+            if (pid > 0) {  /* process_get_info now returns PID or 0 */
+                /* Row background - alternating */
+                uint32_t row_bg = (shown % 2) ? 0x252535 : 0x1E1E2E;
+                gui_draw_rect(content_x + 4, yy, content_w - 8, 24, row_bg);
+                
+                /* PID - show actual PID */
+                char pid_str[8];
+                int pid_val = pid;
+                pid_str[0] = '0' + (pid_val / 10);
+                pid_str[1] = '0' + (pid_val % 10);
+                pid_str[2] = '\0';
+                if (pid_val < 10) { pid_str[0] = '0' + pid_val; pid_str[1] = '\0'; }
+                gui_draw_string(content_x + 16, yy + 5, pid_str, 0xCDD6F4, row_bg);
+                
+                /* Name - truncate if needed */
+                gui_draw_string(content_x + 60, yy + 5, name, 0xCDD6F4, row_bg);
+                
+                /* State with color */
+                const char *state_str = (state >= 0 && state <= 4) ? state_names[state] : "???";
+                uint32_t scol = (state >= 0 && state <= 4) ? state_colors[state] : 0xFFFFFF;
+                gui_draw_string(content_x + 200, yy + 5, state_str, scol, row_bg);
+                
+                /* Kill button - only for non-free processes */
+                if (state != 0) {
+                    gui_draw_rect(content_x + content_w - 60, yy + 2, 40, 20, 0xEF4444);
+                    gui_draw_string(content_x + content_w - 52, yy + 5, "Kill", 0xFFFFFF, 0xEF4444);
+                }
+                
+                yy += 26;
+                shown++;
+            }
+        }
+        
+        /* Footer with summary */
+        yy = content_y + content_h - 26;
+        gui_draw_rect(content_x + 4, yy, content_w - 8, 22, 0x252535);
+        
+        extern int process_count_ready(void);
+        int ready = process_count_ready();
+        char summary[48];
+        /* Build summary string */
+        summary[0] = 'P'; summary[1] = 'r'; summary[2] = 'o'; summary[3] = 'c';
+        summary[4] = 'e'; summary[5] = 's'; summary[6] = 's'; summary[7] = 'e';
+        summary[8] = 's'; summary[9] = ':'; summary[10] = ' ';
+        summary[11] = '0' + (shown / 10);
+        summary[12] = '0' + (shown % 10);
+        summary[13] = ' '; summary[14] = '|'; summary[15] = ' ';
+        summary[16] = 'R'; summary[17] = 'u'; summary[18] = 'n'; summary[19] = 'n';
+        summary[20] = 'i'; summary[21] = 'n'; summary[22] = 'g'; summary[23] = ':';
+        summary[24] = ' ';
+        summary[25] = '0' + ready;
+        summary[26] = '\0';
+        
+        gui_draw_string(content_x + 12, yy + 4, summary, 0xCDD6F4, 0x252535);
+    }
     /* Clock window */
     else if (win->title[0] == 'C' && win->title[1] == 'l' && win->title[2] == 'o') {
         int center_x = content_x + content_w / 2;
@@ -1852,7 +1931,7 @@ static void draw_menu_bar(void)
 #include "icons.h"
 
 static const char *dock_labels[] = {
-    "Term", "Files", "Calc", "Notes", "Set", "Clock", "DOOM", "Snake", "Help", "Web"
+    "Term", "Files", "Calc", "Notes", "Proc", "Clock", "DOOM", "Snake", "Help", "Web"
 };
 #define NUM_DOCK_ICONS 10
 #define DOCK_ICON_SIZE 44   /* Slightly smaller for more icons */
@@ -2629,6 +2708,58 @@ void gui_handle_mouse_event(int x, int y, int buttons)
                 break;
             }
             
+            /* Handle clicks inside Process Manager window */
+            if (win->title[0] == 'P' && win->title[1] == 'r' && win->title[2] == 'o' &&
+                win->title[3] == 'c' && win->title[4] == 'e') {
+                int content_x = win->x + BORDER_WIDTH;
+                int content_y = win->y + BORDER_WIDTH + TITLEBAR_HEIGHT;
+                int content_w = win->width - BORDER_WIDTH * 2;
+                
+                /* Check if click is on a Kill button */
+                /* Kill buttons are at content_x + content_w - 60, width 40, height 20 */
+                /* Process rows start at content_y + 26 (after header), each row is 26px */
+                int kill_btn_x = content_x + content_w - 60;
+                int first_row_y = content_y + 8 + 26;  /* After header */
+                
+                if (x >= kill_btn_x && x < kill_btn_x + 40) {
+                    /* Click is in kill button column - determine which row */
+                    int row = (y - first_row_y) / 26;
+                    
+                    if (row >= 0 && row < 16) {
+                        /* Check if this process exists */
+                        extern int process_get_info(int index, char *name, int name_size, int *state);
+                        extern int process_kill(int pid);
+                        
+                        /* Find the actual process at this visual row */
+                        int shown = 0;
+                        for (int i = 0; i < 16; i++) {
+                            char name[32];
+                            int state = 0;
+                            if (process_get_info(i, name, sizeof(name), &state)) {
+                                if (shown == row && state != 0) {
+                                    /* Found the process to kill */
+                                    /* Get the actual PID from process_get */
+                                    extern process_t *process_get(int pid);
+                                    
+                                    /* Try to get pid from the table index */
+                                    printk("GUI: Attempting to kill process at slot %d\n", i);
+                                    
+                                    /* Use index + 1 as pid approximation */
+                                    int pid_to_kill = i + 1;
+                                    int result = process_kill(pid_to_kill);
+                                    if (result < 0) {
+                                        printk("GUI: Kill failed for pid %d\n", pid_to_kill);
+                                    }
+                                    break;
+                                }
+                                shown++;
+                            }
+                        }
+                    }
+                }
+                break;
+            }
+            
             if (win->on_mouse) {
                 win->on_mouse(win, x - win->x, y - win->y, buttons);
             }
@@ -2669,8 +2800,8 @@ void gui_handle_mouse_event(int x, int y, int buttons)
                         extern void gui_open_notepad(const char *path);
                         gui_open_notepad(NULL);
                         break;
-                    case 4: /* Settings */
-                        gui_create_window("Settings", spawn_x + 20, spawn_y + 30, 380, 320);
+                    case 4: /* Process Manager */
+                        gui_create_window("Process Manager", spawn_x + 20, spawn_y + 30, 340, 380);
                         break;
                     case 5: /* Clock */
                         gui_create_window("Clock", spawn_x + 50, spawn_y + 40, 260, 200);

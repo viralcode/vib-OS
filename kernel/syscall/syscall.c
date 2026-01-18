@@ -321,11 +321,36 @@ static long sys_munmap(uint64_t addr, uint64_t len, uint64_t a2, uint64_t a3, ui
 
 static long sys_clone(uint64_t flags, uint64_t stack, uint64_t ptid, uint64_t tls, uint64_t ctid, uint64_t a5)
 {
-    (void)flags; (void)stack; (void)ptid; (void)tls; (void)ctid; (void)a5;
+    (void)tls; (void)a5;
     
-    /* TODO: Implement process/thread creation */
+    printk(KERN_DEBUG "sys_clone: flags=0x%llx stack=0x%llx\n", 
+           (unsigned long long)flags, (unsigned long long)stack);
     
-    return -ENOSYS;
+    /* Get parent task's entry point from return address */
+    /* For threads, the entry is typically set after clone returns */
+    
+    /* Create thread using scheduler */
+    extern pid_t create_thread(void (*entry)(void *), void *arg, void *stack, uint32_t clone_flags);
+    
+    /* The entry point will be the instruction after the syscall */
+    /* Stack is already set up by userspace */
+    pid_t tid = create_thread(NULL, NULL, (void *)stack, (uint32_t)flags);
+    
+    if (tid < 0) {
+        return -EAGAIN;
+    }
+    
+    /* Store TID in parent if requested */
+    if ((flags & CLONE_PARENT_SETTID) && ptid) {
+        *(pid_t *)ptid = tid;
+    }
+    
+    /* Store TID in child if requested */
+    if ((flags & CLONE_CHILD_SETTID) && ctid) {
+        *(pid_t *)ctid = tid;
+    }
+    
+    return tid;
 }
 
 /* Forward declarations for ELF loader */

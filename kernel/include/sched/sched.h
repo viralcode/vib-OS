@@ -127,6 +127,7 @@ struct task_struct {
 #define PF_IDLE             (1 << 2)    /* Idle task */
 #define PF_USER             (1 << 3)    /* User process (runs at EL0) */
 #define PF_FORKNOEXEC       (1 << 4)    /* Forked but not yet exec'd */
+#define PF_THREAD           (1 << 5)    /* This is a thread (shares mm with parent) */
 
 /* User process memory layout */
 #define USER_STACK_TOP      0x7FFFFFFFF000ULL   /* Top of user stack */
@@ -134,6 +135,16 @@ struct task_struct {
 #define USER_CODE_BASE      0x400000ULL         /* User code start */
 #define USER_HEAP_BASE      0x10000000ULL       /* User heap start */
 #define USER_MMAP_BASE      0x7F0000000000ULL   /* mmap region */
+
+/* Clone flags for threading */
+#define CLONE_VM            0x00000100  /* Share memory space */
+#define CLONE_FS            0x00000200  /* Share filesystem info */
+#define CLONE_FILES         0x00000400  /* Share file descriptors */
+#define CLONE_SIGHAND       0x00000800  /* Share signal handlers */
+#define CLONE_THREAD        0x00010000  /* Same thread group */
+#define CLONE_PARENT_SETTID 0x00100000  /* Set TID in parent */
+#define CLONE_CHILD_CLEARTID 0x00200000 /* Clear TID in child on exit */
+#define CLONE_CHILD_SETTID  0x01000000  /* Set TID in child */
 
 /* ===================================================================== */
 /* Per-CPU run queue */
@@ -181,6 +192,33 @@ int wake_up_process(struct task_struct *task);
  * Return: Pointer to new task, or NULL on failure
  */
 struct task_struct *create_task(void (*entry)(void *), void *arg, uint32_t flags);
+
+/**
+ * create_thread - Create a new thread (shares memory with parent)
+ * @entry: Entry point function
+ * @arg: Argument to pass to entry
+ * @stack: User stack pointer (top of stack)
+ * @clone_flags: Clone flags (CLONE_VM, CLONE_THREAD, etc.)
+ * 
+ * Return: TID of new thread, or negative on failure
+ */
+pid_t create_thread(void (*entry)(void *), void *arg, void *stack, uint32_t clone_flags);
+
+/**
+ * get_task_by_pid - Find a task by PID/TID
+ * @pid: Process/Thread ID
+ * 
+ * Return: Task pointer or NULL if not found
+ */
+struct task_struct *get_task_by_pid(pid_t pid);
+
+/**
+ * sched_kill_task - Send termination signal to a task (scheduler API)
+ * @pid: Task ID to kill
+ * 
+ * Return: 0 on success, negative on error
+ */
+int sched_kill_task(pid_t pid);
 
 /**
  * exit_task - Terminate current task

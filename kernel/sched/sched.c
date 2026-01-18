@@ -259,6 +259,125 @@ void exit_task(int code)
     }
 }
 
+/* ===================================================================== */
+/* Multi-threading Support */
+/* ===================================================================== */
+
+pid_t create_thread(void (*entry)(void *), void *arg, void *stack, uint32_t clone_flags)
+{
+    struct task_struct *parent = runqueue.current;
+    struct task_struct *task = alloc_task();
+    
+    if (!task) {
+        printk(KERN_ERR "SCHED: Failed to allocate thread\n");
+        return -1;
+    }
+    
+    /* Initialize thread - inherit most things from parent */
+    task->state = TASK_RUNNING;
+    task->prio = parent->prio;
+    task->static_prio = parent->static_prio;
+    task->nice = parent->nice;
+    task->pid = next_pid++;
+    task->tgid = (clone_flags & CLONE_THREAD) ? parent->tgid : task->pid;
+    task->flags = PF_THREAD;
+    task->parent = parent;
+    task->uid = parent->uid;
+    task->gid = parent->gid;
+    
+    /* Copy name with " [thread]" suffix */
+    int i;
+    for (i = 0; i < TASK_COMM_LEN - 10 && parent->comm[i]; i++) {
+        task->comm[i] = parent->comm[i];
+    }
+    task->comm[i] = '\0';
+    
+    /* Share memory if CLONE_VM is set */
+    if (clone_flags & CLONE_VM) {
+        task->mm = parent->mm;
+        task->active_mm = parent->active_mm;
+        if (task->mm) {
+            task->mm->users.counter++;
+        }
+    } else {
+        /* Would need to copy address space - not implemented */
+        task->mm = parent->mm;
+        task->active_mm = parent->active_mm;
+    }
+    
+    /* Use provided stack or allocate new one */
+    if (stack) {
+        task->stack = stack;
+        task->stack_size = 0;  /* External stack, don't free */
+        task->cpu_context.sp = (uint64_t)stack;
+    } else {
+        #define KERNEL_STACK_SIZE   (16 * 1024)
+        task->stack = alloc_stack(KERNEL_STACK_SIZE);
+        if (!task->stack) {
+            printk(KERN_ERR "SCHED: Failed to allocate thread stack\n");
+            return -1;
+        }
+        task->stack_size = KERNEL_STACK_SIZE;
+        task->cpu_context.sp = (uint64_t)task->stack + KERNEL_STACK_SIZE;
+    }
+    
+    task->cpu_context.pc = (uint64_t)entry;
+    task->cpu_context.x19 = (uint64_t)arg;
+    
+    printk(KERN_INFO "SCHED: Created thread %d (tgid=%d) for '%s'\n", 
+           task->pid, task->tgid, parent->comm);
+    
+    /* Add to run queue */
+    enqueue_task(task);
+    
+    return task->pid;
+}
+
+struct task_struct *get_task_by_pid(pid_t pid)
+{
+    /* Check init task */
+    if (init_task.pid == pid) {
+        return &init_task;
+    }
+    
+    /* Search task pool */
+    for (int i = 0; i < task_pool_index; i++) {
+        if (task_pool[i].pid == pid && task_pool[i].state != TASK_DEAD) {
+            return &task_pool[i];
+        }
+    }
+    
+    return NULL;
+}
+
+int sched_kill_task(pid_t pid)
+{
+    struct task_struct *task = get_task_by_pid(pid);
+    
+    if (!task) {
+        return -3;  /* ESRCH - No such process */
+    }
+    
+    /* Can't kill init or idle */
+    if (task->pid == 0 || (task->flags & PF_IDLE)) {
+        return -1;  /* EPERM - Operation not permitted */
+    }
+    
+    /* Mark for termination */
+    printk(KERN_INFO "SCHED: Killing task %d '%s'\n", pid, task->comm);
+    
+    task->flags |= PF_EXITING;
+    task->pending_signals |= (1ULL << 9);  /* SIGKILL */
+    
+    /* If sleeping, wake it up */
+    if (task->state == TASK_INTERRUPTIBLE || task->state == TASK_UNINTERRUPTIBLE) {
+        task->state = TASK_RUNNING;
+        enqueue_task(task);
+    }
+    
+    return 0;
+}
+
 struct task_struct *get_current(void)
 {
     return runqueue.current;

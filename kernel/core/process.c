@@ -138,7 +138,26 @@ int process_get_info(int index, char *name, int name_size, int *state) {
     // Return state
     if (state) *state = (int)p->state;
 
-    return 1;
+    return p->pid;  /* Return actual PID instead of just 1 */
+}
+
+/* Get all processes as an array (for process manager) */
+int process_list(int *pids, char names[][PROCESS_NAME_MAX], int *states, int max_count) {
+    int count = 0;
+    for (int i = 0; i < MAX_PROCESSES && count < max_count; i++) {
+        if (proc_table[i].state != PROC_STATE_FREE) {
+            if (pids) pids[count] = proc_table[i].pid;
+            if (names) {
+                int len = strlen(proc_table[i].name);
+                if (len >= PROCESS_NAME_MAX) len = PROCESS_NAME_MAX - 1;
+                for (int j = 0; j < len; j++) names[count][j] = proc_table[i].name[j];
+                names[count][len] = '\0';
+            }
+            if (states) states[count] = (int)proc_table[i].state;
+            count++;
+        }
+    }
+    return count;
 }
 
 // Create a new process (load the binary but don't start it)
