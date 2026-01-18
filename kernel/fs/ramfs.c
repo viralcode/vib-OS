@@ -542,13 +542,66 @@ int ramfs_create_file(const char *path, mode_t mode, const char *content)
     return 0;
 }
 
+/* Helper to find or create parent directory from path */
+static struct ramfs_inode *ramfs_get_parent_dir(const char *path, char *filename)
+{
+    /* Find last '/' in path */
+    const char *last_slash = NULL;
+    for (const char *p = path; *p; p++) {
+        if (*p == '/') last_slash = p;
+    }
+    
+    if (!last_slash) {
+        /* No directory, just filename - use root */
+        int i = 0;
+        while (path[i] && i < RAMFS_MAX_NAME) {
+            filename[i] = path[i];
+            i++;
+        }
+        filename[i] = '\0';
+        return ramfs_sb.root;
+    }
+    
+    /* Extract directory name */
+    char dirname[RAMFS_MAX_NAME + 1];
+    int len = last_slash - path;
+    if (len > RAMFS_MAX_NAME) len = RAMFS_MAX_NAME;
+    for (int i = 0; i < len; i++) {
+        dirname[i] = path[i];
+    }
+    dirname[len] = '\0';
+    
+    /* Extract filename */
+    int i = 0;
+    const char *fname = last_slash + 1;
+    while (fname[i] && i < RAMFS_MAX_NAME) {
+        filename[i] = fname[i];
+        i++;
+    }
+    filename[i] = '\0';
+    
+    /* Find directory */
+    struct ramfs_inode *dir = ramfs_lookup_child(ramfs_sb.root, dirname);
+    if (!dir) {
+        return NULL;
+    }
+    
+    return dir;
+}
+
 int ramfs_create_file_bytes(const char *path, mode_t mode, const uint8_t *data, size_t size)
 {
     if (!ramfs_sb.root) {
         return -ENOENT;
     }
 
-    struct ramfs_inode *file = ramfs_alloc_inode(S_IFREG | mode, path);
+    char filename[RAMFS_MAX_NAME + 1];
+    struct ramfs_inode *parent = ramfs_get_parent_dir(path, filename);
+    if (!parent) {
+        return -ENOENT;
+    }
+
+    struct ramfs_inode *file = ramfs_alloc_inode(S_IFREG | mode, filename);
     if (!file) {
         return -ENOMEM;
     }
@@ -565,7 +618,7 @@ int ramfs_create_file_bytes(const char *path, mode_t mode, const uint8_t *data, 
         file->data_capacity = size;
     }
 
-    ramfs_add_child(ramfs_sb.root, file);
+    ramfs_add_child(parent, file);
     printk(KERN_INFO "RAMFS: Created file '%s' (%lu bytes)\n", path, (unsigned long)size);
     return 0;
 }

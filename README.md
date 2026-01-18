@@ -111,8 +111,9 @@ graph TD
 ## ✨ Features
 
 ### 🖥 Graphical User Interface
-- **Window Manager**: Draggable windows with focus management and z-ordering
+- **Window Manager**: Draggable and **resizable** windows with focus management and z-ordering
 - **Traffic Light Controls**: Close, Minimize, and Maximize buttons (macOS-style)
+- **Window Resizing**: Drag any edge or corner to resize windows (all 8 directions supported)
 - **Taskbar & Dock**: Animated dock with hover labels; top menu bar with clock and WiFi status
 - **Compositor**: Double-buffered rendering engine for flicker-free visuals
 - **Modern Design**: Clean, intuitive interface inspired by macOS
@@ -161,18 +162,23 @@ graph TD
   - VGA/VESA (x86_64)
   - Bochs Graphics Adapter
 
-### 🔊 Audio (Experimental)
+### 🔊 Audio & Media
 - **Intel HDA**: High Definition Audio controller driver
 - **PCM Playback**: 16-bit stereo audio support
-- **MP3 Decoder**: minimp3 library integration
+- **MP3 Decoder**: minimp3 library integration for MP3 playback
+- **JPEG Decoder**: picojpeg library for image viewing
+- **Media Pipeline**: Load and decode media files from VFS
 
 ### 📦 Applications
-- **Terminal**: `ls`, `cd`, `help`, `clear`, `cat`, `echo`, environment variables
+- **Terminal**: `ls`, `cd`, `help`, `clear`, `cat`, `echo`, `play`, `view` commands
 - **Notepad**: Text editor with save/load functionality backed by VFS
+- **Image Viewer**: JPEG image viewer with zoom and pan support
+- **Audio Player**: MP3 playback support via minimp3 decoder
 - **Snake**: Classic game with graphics and score tracking
 - **Calculator**: Basic arithmetic operations with GUI
-- **File Manager**: Browse, create, rename, and delete files
+- **File Manager**: Browse, create, rename, and delete files (click images/audio to open)
 - **Doom**: Full Doom port with graphics, input, and sound
+- **Clock**: Real-time analog clock with hour/minute/second hands
 - **About**: System information dialog
 
 ## 🚀 Quick Start
@@ -320,15 +326,6 @@ Use UTM (https://mac.getutm.app/):
 3. Configure 2GB+ RAM
 4. Start VM
 
-## 📚 Documentation
-
-- [Multi-Architecture Build Guide](docs/MULTIARCH_BUILD.md) - Detailed build instructions
-- [Multi-Architecture Implementation](docs/MULTIARCH_IMPLEMENTATION.md) - Technical details
-- [Quick Start Guide](MULTIARCH_QUICKSTART.md) - Quick reference
-- [Build Status](BUILD_ALL.md) - Current build status and hardware compatibility
-- [Boot Support](docs/BOOT_SUPPORT.md) - Boot methods and requirements
-- [Known Issues](KNOWN_ISSUES.md) - Current limitations and bugs
-
 ## 🚧 Current Status & Known Issues
 
 ### What Works
@@ -351,12 +348,13 @@ Use UTM (https://mac.getutm.app/):
 ### Roadmap
 - [ ] **Persistent Storage**: Implement EXT4/FAT32 write support
 - [ ] **x86 32-bit**: Complete kernel implementation
-- [ ] **Audio**: Fix Intel HDA buffer management
+- [ ] **Audio**: Stabilize Intel HDA buffer management
 - [ ] **USB Support**: Add USB mass storage and HID drivers
 - [ ] **Multi-core**: SMP support for multiple CPUs
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
-- [ ] **More Apps**: Text editor, image viewer, music player
+- [ ] **PNG Support**: Add PNG image decoder
+- [ ] **Video Player**: Basic video playback support
 
 ## 🤝 Contributing
 

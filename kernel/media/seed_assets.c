@@ -15,3 +15,5 @@
 #include "seed_jpeg.inc"
 #undef _tmp_vibos_seed_jpg
 #undef _tmp_vibos_seed_jpg_len
+
+/* Bootstrap images are compiled separately as .c files */

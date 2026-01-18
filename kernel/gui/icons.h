@@ -411,7 +411,7 @@ static const unsigned char *dock_icons_bmp[] = {
     icon_calc,     /* 2 - Calculator */
     icon_notepad,  /* 3 - Notepad */
     icon_settings, /* 4 - Settings */
-    icon_clock,    /* 5 - Clock/Monitor */
+    icon_notepad,  /* 5 - Paint (using notepad icon temporarily) */
     icon_doom,     /* 6 - DOOM */
     icon_snake,    /* 7 - Snake */
     icon_help,     /* 8 - Help */

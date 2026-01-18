@@ -192,7 +192,32 @@ static void init_subsystems(void *dtb)
     ramfs_create_file("readme.txt", 0644, "Welcome to Vib-OS!\nThis is a real file in RamFS.");
     ramfs_create_file("todo.txt", 0644, "- Implement Browser\n- Fix Bugs\n- Sleep");
     ramfs_create_file_bytes("sample.mp3", 0644, vib_seed_mp3, vib_seed_mp3_len);
-    ramfs_create_file_bytes("sample.jpg", 0644, vib_seed_jpg, vib_seed_jpg_len);
+    
+    /* Add baseline JPEG images to Pictures directory */
+    extern const unsigned char bootstrap_landscape_jpg[];
+    extern const unsigned int bootstrap_landscape_jpg_len;
+    extern const unsigned char bootstrap_portrait_jpg[];
+    extern const unsigned int bootstrap_portrait_jpg_len;
+    extern const unsigned char bootstrap_square_jpg[];
+    extern const unsigned int bootstrap_square_jpg_len;
+    extern const unsigned char bootstrap_wallpaper_jpg[];
+    extern const unsigned int bootstrap_wallpaper_jpg_len;
+    /* Real photos from the internet */
+    extern const unsigned char bootstrap_nature_jpg[];
+    extern const unsigned int bootstrap_nature_jpg_len;
+    extern const unsigned char bootstrap_city_jpg[];
+    extern const unsigned int bootstrap_city_jpg_len;
+    extern const unsigned char bootstrap_httpbin_jpg[];
+    extern const unsigned int bootstrap_httpbin_jpg_len;
+    
+    ramfs_create_file_bytes("Pictures/landscape.jpg", 0644, bootstrap_landscape_jpg, bootstrap_landscape_jpg_len);
+    ramfs_create_file_bytes("Pictures/portrait.jpg", 0644, bootstrap_portrait_jpg, bootstrap_portrait_jpg_len);
+    ramfs_create_file_bytes("Pictures/square.jpg", 0644, bootstrap_square_jpg, bootstrap_square_jpg_len);
+    ramfs_create_file_bytes("Pictures/wallpaper.jpg", 0644, bootstrap_wallpaper_jpg, bootstrap_wallpaper_jpg_len);
+    /* Real photos */
+    ramfs_create_file_bytes("Pictures/nature.jpg", 0644, bootstrap_nature_jpg, bootstrap_nature_jpg_len);
+    ramfs_create_file_bytes("Pictures/city.jpg", 0644, bootstrap_city_jpg, bootstrap_city_jpg_len);
+    ramfs_create_file_bytes("Pictures/pig.jpg", 0644, bootstrap_httpbin_jpg, bootstrap_httpbin_jpg_len);
     
     /* Mount proc, sys, dev (placeholders) */
     printk(KERN_INFO "  Mounting procfs...\n");
