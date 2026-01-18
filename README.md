@@ -125,7 +125,13 @@ graph TD
 ### 📂 File System (VFS)
 - **Virtual File System**: Unified interface for different filesystems
 - **RamFS**: In-memory filesystem for temporary storage
-- **EXT4 Support**: Read support for EXT4 filesystems (experimental)
+- **EXT4 Read/Write Support**: Full implementation including:
+  - Block bitmap management (alloc/free)
+  - Inode bitmap management (alloc/free)
+  - Directory entry creation
+  - File creation and writing
+  - Indirect block support (single/double)
+  - Superblock sync
 - **APFS Support**: Read support for Apple File System (experimental)
 - **Interactive File Manager**:
   - Grid view for files and folders
@@ -147,6 +153,10 @@ graph TD
 - **Preemptive Multitasking**: Priority-based scheduler with context switching
 - **Process Manager**: GUI app showing all running processes with kill functionality
 - **Multi-threading**: Full thread support via `clone()` syscall with `CLONE_VM` for shared memory
+- **Userspace Execution**: Complete `sys_execve` implementation:
+  - ELF loading with validation
+  - User stack setup (argc/argv/envp)
+  - Jump to userspace via `eret` (ARM64) or `iretq` (x86_64)
 - **SMP Support**: Symmetric Multi-Processing infrastructure (boots on CPU 0, secondary CPU support ready)
 - **Memory Management**: 4-level paging (ARM64) and 4-level paging (x86_64)
 - **Virtual Memory**: Full MMU support with demand paging
@@ -341,10 +351,12 @@ Use UTM (https://mac.getutm.app/):
 - ✅ x86_64 kernel builds successfully
 - ✅ GUI system with windows, dock, and applications
 - ✅ File system (RamFS) with file manager
+- ✅ **EXT4 Read/Write Support** - Full implementation with block/inode allocation
 - ✅ Networking (TCP/IP stack, virtio-net)
 - ✅ Process management with GUI process manager
 - ✅ Multi-threading via clone() syscall
 - ✅ SMP infrastructure initialized
+- ✅ **Complete sys_execve** - Loads ELF, sets up user stack, jumps to userspace
 - ✅ Input (keyboard and mouse)
 - ✅ Doom runs with full graphics
 - ✅ MP3 audio playback (via minimp3)
@@ -352,16 +364,16 @@ Use UTM (https://mac.getutm.app/):
 
 ### Known Issues
 1. **Sound Support**: Intel HDA driver works but audio may be choppy in QEMU
-2. **Persistent Storage**: Currently RAM-only (RamFS) - data lost on reboot
-3. **x86_64 Testing**: Needs more real hardware testing
-4. **Network Settings UI**: Not fully implemented
-5. **Web Browser**: Basic rendering only, no full HTML parser
+2. **x86_64 Testing**: Needs more real hardware testing
+3. **Network Settings UI**: Not fully implemented
+4. **Web Browser**: Basic rendering only, no full HTML parser
 
 ### Roadmap
 - [x] ~~**Multi-core**: SMP support for multiple CPUs~~ *(Infrastructure complete)*
 - [x] ~~**Process Manager**: View and kill running processes~~ *(Done)*
 - [x] ~~**Multi-threading**: Thread creation via clone()~~ *(Done)*
-- [ ] **Persistent Storage**: Implement EXT4/FAT32 write support
+- [x] ~~**EXT4 Write Support**: Full read/write with bitmap management~~ *(Done)*
+- [x] ~~**Userspace Execution**: Complete sys_execve implementation~~ *(Done)*
 - [ ] **x86 32-bit**: Complete kernel implementation
 - [ ] **USB Support**: Add USB mass storage and HID drivers
 - [ ] **User Accounts**: Login screen and multi-user support
