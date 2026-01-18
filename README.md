@@ -70,6 +70,7 @@ graph TD
     subgraph Userspace ["Userspace (EL0/Ring 3)"]
         GUI[Window Manager & GUI Apps]
         Shell[Terminal / Shell]
+        ProcMgr[Process Manager]
         Doom[Doom Engine]
     end
 
@@ -78,9 +79,10 @@ graph TD
         
         subgraph Subsystems
             VFS[Virtual File System]
-            Process[Process Scheduler]
+            Process["Process Scheduler + Threading"]
             Net[TCP/IP Networking Stack]
             Mem["Memory Manager (PMM/VMM)"]
+            SMP["SMP (Multi-CPU)"]
         end
         
         subgraph Drivers
@@ -95,6 +97,7 @@ graph TD
 
     GUI --> Syscall
     Shell --> Syscall
+    ProcMgr --> Syscall
     Doom --> Syscall
     
     Syscall --> VFS
@@ -104,6 +107,7 @@ graph TD
     VFS --> RamFS
     Net --> VirtioNet
     Process --> Mem
+    Process --> SMP
     
     Drivers --> Hardware
 ```
@@ -141,6 +145,9 @@ graph TD
 ### 🛠 Core System
 - **Multi-Architecture Kernel**: Supports ARM64 and x86_64 with clean abstraction layer
 - **Preemptive Multitasking**: Priority-based scheduler with context switching
+- **Process Manager**: GUI app showing all running processes with kill functionality
+- **Multi-threading**: Full thread support via `clone()` syscall with `CLONE_VM` for shared memory
+- **SMP Support**: Symmetric Multi-Processing infrastructure (boots on CPU 0, secondary CPU support ready)
 - **Memory Management**: 4-level paging (ARM64) and 4-level paging (x86_64)
 - **Virtual Memory**: Full MMU support with demand paging
 - **Interrupt Handling**: 
@@ -174,6 +181,7 @@ graph TD
 - **Notepad**: Text editor with save/load functionality backed by VFS
 - **Image Viewer**: JPEG image viewer with zoom and pan support
 - **Audio Player**: MP3 playback support via minimp3 decoder
+- **Process Manager**: View running processes (PID, name, state) with kill button
 - **Snake**: Classic game with graphics and score tracking
 - **Calculator**: Basic arithmetic operations with GUI
 - **File Manager**: Browse, create, rename, and delete files (click images/audio to open)
@@ -334,23 +342,28 @@ Use UTM (https://mac.getutm.app/):
 - ✅ GUI system with windows, dock, and applications
 - ✅ File system (RamFS) with file manager
 - ✅ Networking (TCP/IP stack, virtio-net)
-- ✅ Process management and scheduling
+- ✅ Process management with GUI process manager
+- ✅ Multi-threading via clone() syscall
+- ✅ SMP infrastructure initialized
 - ✅ Input (keyboard and mouse)
 - ✅ Doom runs with full graphics
+- ✅ MP3 audio playback (via minimp3)
+- ✅ JPEG image viewing (via picojpeg)
 
 ### Known Issues
-1. **Sound Support**: Intel HDA driver initializes but audio playback is unstable
+1. **Sound Support**: Intel HDA driver works but audio may be choppy in QEMU
 2. **Persistent Storage**: Currently RAM-only (RamFS) - data lost on reboot
 3. **x86_64 Testing**: Needs more real hardware testing
 4. **Network Settings UI**: Not fully implemented
 5. **Web Browser**: Basic rendering only, no full HTML parser
 
 ### Roadmap
+- [x] ~~**Multi-core**: SMP support for multiple CPUs~~ *(Infrastructure complete)*
+- [x] ~~**Process Manager**: View and kill running processes~~ *(Done)*
+- [x] ~~**Multi-threading**: Thread creation via clone()~~ *(Done)*
 - [ ] **Persistent Storage**: Implement EXT4/FAT32 write support
 - [ ] **x86 32-bit**: Complete kernel implementation
-- [ ] **Audio**: Stabilize Intel HDA buffer management
 - [ ] **USB Support**: Add USB mass storage and HID drivers
-- [ ] **Multi-core**: SMP support for multiple CPUs
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
 - [ ] **PNG Support**: Add PNG image decoder
