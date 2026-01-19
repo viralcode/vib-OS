@@ -20,8 +20,10 @@ void desktop_arrange_icons(void);
 /* Event handling */
 int desktop_handle_click(int x, int y, int button, int shift_held);
 int desktop_handle_double_click(int x, int y);
+int desktop_handle_key(int key);  /* Returns 1 if consumed */
 int desktop_context_menu_hover(int mx, int my);
 int desktop_context_menu_click(int mx, int my);
+int desktop_is_renaming(void);
 
 /* Drawing */
 void desktop_draw_icons(void);

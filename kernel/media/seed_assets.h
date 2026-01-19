@@ -32,4 +32,14 @@ extern const unsigned int bootstrap_city_jpg_len;
 extern const unsigned char bootstrap_httpbin_jpg[];
 extern const unsigned int bootstrap_httpbin_jpg_len;
 
+/* HD Wallpapers (high quality) */
+extern const unsigned char hd_wallpaper_landscape_jpg[];
+extern const unsigned int hd_wallpaper_landscape_jpg_len;
+
+extern const unsigned char hd_wallpaper_nature_jpg[];
+extern const unsigned int hd_wallpaper_nature_jpg_len;
+
+extern const unsigned char hd_wallpaper_city_jpg[];
+extern const unsigned int hd_wallpaper_city_jpg_len;
+
 #endif /* _KERNEL_MEDIA_SEED_ASSETS_H */

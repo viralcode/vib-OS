@@ -56,7 +56,7 @@ CROSS_TARGET := --target=aarch64-unknown-none-elf
 
 # Compiler flags
 # CPU target: generic works on QEMU and most ARM64 hardware
-CFLAGS_COMMON := -Wall -Wextra -Wno-unused-function -ffreestanding -fno-stack-protector \
+CFLAGS_COMMON := -Wall -Wextra -Wno-unused-function -ffreestanding -fstack-protector-strong \
                  -fno-pic -mcpu=cortex-a72 -O2 -g
 
 CFLAGS_KERNEL := $(CFLAGS_COMMON) $(CROSS_TARGET) \
@@ -292,6 +292,22 @@ run-gui: kernel
 		-cpu max -m 512M \
 		-global virtio-mmio.force-legacy=false \
 		-device ramfb \
+		-device virtio-keyboard-device \
+		-device virtio-tablet-device \
+		-device virtio-net-device,netdev=net0 \
+		-netdev user,id=net0 \
+		-audiodev coreaudio,id=snd0 \
+		-device intel-hda -device hda-duplex,audiodev=snd0 \
+		-serial stdio \
+		-kernel $(KERNEL_BINARY)
+
+run-gpu: kernel
+	@echo "[RUN] Starting Vib-OS with virtio-GPU acceleration..."
+	@qemu-system-aarch64 -M virt,gic-version=3 \
+		-cpu max -m 512M \
+		-global virtio-mmio.force-legacy=false \
+		-device ramfb \
+		-device virtio-gpu-pci \
 		-device virtio-keyboard-device \
 		-device virtio-tablet-device \
 		-device virtio-net-device,netdev=net0 \
