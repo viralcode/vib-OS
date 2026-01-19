@@ -17,6 +17,15 @@ extern void gui_draw_string(int x, int y, const char *str, uint32_t fg, uint32_t
 extern void gui_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg);
 extern void gui_draw_line(int x, int y, int x2, int y2, uint32_t color);
 
+/* External window functions */
+struct window;  /* Forward declare */
+extern struct window *gui_create_window(const char *title, int x, int y, int w, int h);
+extern struct window *gui_create_file_manager_path(int x, int y, const char *path);
+extern uint32_t gui_get_screen_width(void);
+extern uint32_t gui_get_screen_height(void);
+extern void gui_open_image_viewer(const char *path);
+extern void gui_open_notepad(const char *path);
+
 /* Forward declarations */
 void desktop_sort_icons(void);
 void desktop_arrange_icons(void);
@@ -368,18 +377,30 @@ static void draw_desktop_icon(desktop_icon_t *icon)
 /* Context Menu */
 /* ===================================================================== */
 
+/* Forward declarations for menu actions */
 static void menu_action_open(void *ctx);
+static void menu_action_open_with(void *ctx);
 static void menu_action_new_folder(void *ctx);
 static void menu_action_new_file(void *ctx);
+static void menu_action_new_shortcut(void *ctx);
 static void menu_action_rename(void *ctx);
 static void menu_action_delete(void *ctx);
 static void menu_action_copy(void *ctx);
 static void menu_action_cut(void *ctx);
 static void menu_action_paste(void *ctx);
+static void menu_action_paste_shortcut(void *ctx);
+static void menu_action_properties(void *ctx);
 static void menu_action_sort_name(void *ctx);
 static void menu_action_sort_date(void *ctx);
 static void menu_action_sort_type(void *ctx);
+static void menu_action_sort_size(void *ctx);
 static void menu_action_refresh(void *ctx);
+static void menu_action_view_icons(void *ctx);
+static void menu_action_view_list(void *ctx);
+static void menu_action_select_all(void *ctx);
+static void menu_action_personalize(void *ctx);
+static void menu_action_display_settings(void *ctx);
+static void menu_action_terminal_here(void *ctx);
 
 static void ctx_menu_add_item(const char *label, void (*action)(void *), int enabled)
 {
@@ -406,31 +427,42 @@ void desktop_show_context_menu(int x, int y, int on_icon)
     ctx_menu.hover_index = -1;
     ctx_menu.visible = 1;
     
+    printk(KERN_DEBUG "DESKTOP: Showing context menu at (%d,%d) on_icon=%d\n", x, y, on_icon);
+    
     if (on_icon) {
-        /* Context menu for selected icon(s) */
+        /* Context menu for selected file/folder - Windows style */
         ctx_menu_add_item("Open", menu_action_open, 1);
+        ctx_menu_add_item("Open with...", menu_action_open_with, 1);
         ctx_menu_add_separator();
-        ctx_menu_add_item("Rename", menu_action_rename, desktop_selected_count == 1);
-        ctx_menu_add_item("Delete", menu_action_delete, 1);
-        ctx_menu_add_separator();
-        ctx_menu_add_item("Copy", menu_action_copy, 1);
         ctx_menu_add_item("Cut", menu_action_cut, 1);
+        ctx_menu_add_item("Copy", menu_action_copy, 1);
+        ctx_menu_add_separator();
+        ctx_menu_add_item("Create shortcut", menu_action_new_shortcut, 1);
+        ctx_menu_add_item("Delete", menu_action_delete, 1);
+        ctx_menu_add_item("Rename", menu_action_rename, desktop_selected_count == 1);
+        ctx_menu_add_separator();
+        ctx_menu_add_item("Properties", menu_action_properties, 1);
     } else {
-        /* Context menu for desktop background */
-        ctx_menu_add_item("New Folder", menu_action_new_folder, 1);
-        ctx_menu_add_item("New File", menu_action_new_file, 1);
+        /* Context menu for desktop background - Windows style */
+        ctx_menu_add_item("View", menu_action_view_icons, 1);     /* Would have submenu */
+        ctx_menu_add_item("Sort by", menu_action_sort_name, 1);   /* Would have submenu */
+        ctx_menu_add_item("Refresh", menu_action_refresh, 1);
         ctx_menu_add_separator();
         ctx_menu_add_item("Paste", menu_action_paste, clipboard_path[0] != '\0');
+        ctx_menu_add_item("Paste shortcut", menu_action_paste_shortcut, clipboard_path[0] != '\0');
         ctx_menu_add_separator();
-        ctx_menu_add_item("Sort by Name", menu_action_sort_name, 1);
-        ctx_menu_add_item("Sort by Date", menu_action_sort_date, 1);
-        ctx_menu_add_item("Sort by Type", menu_action_sort_type, 1);
+        ctx_menu_add_item("New Folder", menu_action_new_folder, 1);
+        ctx_menu_add_item("New Text Document", menu_action_new_file, 1);
+        ctx_menu_add_item("New Shortcut", menu_action_new_shortcut, 1);
         ctx_menu_add_separator();
-        ctx_menu_add_item("Refresh", menu_action_refresh, 1);
+        ctx_menu_add_item("Open in Terminal", menu_action_terminal_here, 1);
+        ctx_menu_add_separator();
+        ctx_menu_add_item("Display settings", menu_action_display_settings, 1);
+        ctx_menu_add_item("Personalize", menu_action_personalize, 1);
     }
     
     /* Calculate menu size */
-    ctx_menu.width = 160;
+    ctx_menu.width = 180;
     ctx_menu.height = ctx_menu.item_count * 24 + 8;
     
     /* Add space for separators */
@@ -440,7 +472,20 @@ void desktop_show_context_menu(int x, int y, int on_icon)
         }
     }
     
-    desktop_mark_dirty(x, y, ctx_menu.width + 4, ctx_menu.height + 4);
+    /* Ensure menu stays on screen */
+    extern uint32_t gui_get_screen_width(void);
+    extern uint32_t gui_get_screen_height(void);
+    uint32_t screen_w = gui_get_screen_width();
+    uint32_t screen_h = gui_get_screen_height();
+    
+    if (x + ctx_menu.width > (int)screen_w) {
+        ctx_menu.x = screen_w - ctx_menu.width - 4;
+    }
+    if (y + ctx_menu.height > (int)screen_h - 70) {  /* Dock height */
+        ctx_menu.y = screen_h - 70 - ctx_menu.height - 4;
+    }
+    
+    desktop_mark_dirty(ctx_menu.x, ctx_menu.y, ctx_menu.width + 4, ctx_menu.height + 4);
 }
 
 void desktop_hide_context_menu(void)
@@ -713,21 +758,27 @@ static void menu_action_open(void *ctx)
             printk(KERN_INFO "DESKTOP: Opening %s\n", desktop_icons[i].path);
             
             if (desktop_icons[i].type == ICON_TYPE_FOLDER) {
-                /* Open in file manager */
-                extern struct window *gui_create_file_manager_at(int x, int y, const char *path);
-                /* gui_create_file_manager_at(200, 100, desktop_icons[i].path); */
+                /* Open folder in file manager */
+                gui_create_file_manager_path(200, 100, desktop_icons[i].path);
             } else if (desktop_icons[i].type == ICON_TYPE_IMAGE) {
-                extern void gui_open_image_viewer(const char *path);
                 gui_open_image_viewer(desktop_icons[i].path);
             } else if (desktop_icons[i].type == ICON_TYPE_TEXT) {
-                extern void gui_open_notepad(const char *path);
                 gui_open_notepad(desktop_icons[i].path);
             } else if (desktop_icons[i].type == ICON_TYPE_AUDIO) {
-                extern void gui_play_mp3_file(const char *path);
-                /* gui_play_mp3_file(desktop_icons[i].path); */
+                /* Play audio file */
+                printk(KERN_INFO "DESKTOP: Playing audio %s\n", desktop_icons[i].path);
+            } else {
+                /* Default: try to open as text */
+                gui_open_notepad(desktop_icons[i].path);
             }
         }
     }
+}
+
+static void menu_action_open_with(void *ctx)
+{
+    (void)ctx;
+    printk(KERN_INFO "DESKTOP: Open with... (not implemented)\n");
 }
 
 static void menu_action_new_folder(void *ctx)
@@ -970,6 +1021,80 @@ static void menu_action_refresh(void *ctx)
 {
     (void)ctx;
     desktop_refresh();
+}
+
+static void menu_action_new_shortcut(void *ctx)
+{
+    (void)ctx;
+    printk(KERN_INFO "DESKTOP: Create shortcut (not implemented)\n");
+}
+
+static void menu_action_paste_shortcut(void *ctx)
+{
+    (void)ctx;
+    printk(KERN_INFO "DESKTOP: Paste shortcut (not implemented)\n");
+}
+
+static void menu_action_properties(void *ctx)
+{
+    (void)ctx;
+    for (int i = 0; i < desktop_icon_count; i++) {
+        if (desktop_icons[i].selected) {
+            printk(KERN_INFO "DESKTOP: Properties for %s\n", desktop_icons[i].name);
+            printk(KERN_INFO "  Type: %d\n", desktop_icons[i].type);
+            printk(KERN_INFO "  Path: %s\n", desktop_icons[i].path);
+            break;
+        }
+    }
+}
+
+static void menu_action_sort_size(void *ctx)
+{
+    (void)ctx;
+    desktop_sort_mode = SORT_SIZE;
+    desktop_sort_icons();
+    desktop_arrange_icons();
+    desktop_mark_full_redraw();
+}
+
+static void menu_action_view_icons(void *ctx)
+{
+    (void)ctx;
+    printk(KERN_INFO "DESKTOP: View as icons\n");
+}
+
+static void menu_action_view_list(void *ctx)
+{
+    (void)ctx;
+    printk(KERN_INFO "DESKTOP: View as list\n");
+}
+
+static void menu_action_select_all(void *ctx)
+{
+    (void)ctx;
+    for (int i = 0; i < desktop_icon_count; i++) {
+        desktop_icons[i].selected = 1;
+    }
+    desktop_selected_count = desktop_icon_count;
+    desktop_mark_full_redraw();
+}
+
+static void menu_action_personalize(void *ctx)
+{
+    (void)ctx;
+    gui_create_window("Settings", 200, 100, 400, 350);
+}
+
+static void menu_action_display_settings(void *ctx)
+{
+    (void)ctx;
+    gui_create_window("Display Settings", 200, 100, 400, 300);
+}
+
+static void menu_action_terminal_here(void *ctx)
+{
+    (void)ctx;
+    gui_create_window("Terminal", 200, 100, 450, 320);
 }
 
 /* ===================================================================== */

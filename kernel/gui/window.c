@@ -2555,6 +2555,75 @@ void gui_handle_mouse_event(int x, int y, int buttons)
     
     prev_buttons = buttons;
     
+    /* Handle desktop right-click (context menu) - check BEFORE left_click gate */
+    if (right_click) {
+        /* Check if right-click is on desktop area (not on window, menu bar, or dock) */
+        int on_window = 0;
+        for (struct window *win = window_stack; win; win = win->next) {
+            if (!win->visible) continue;
+            if (x >= win->x && x < win->x + win->width &&
+                y >= win->y && y < win->y + win->height) {
+                on_window = 1;
+                break;
+            }
+        }
+        
+        if (!on_window && y > MENU_BAR_HEIGHT && y < (int)primary_display.height - DOCK_HEIGHT) {
+            /* Right-click on desktop - handle in desktop manager */
+            desktop_handle_click(x, y, 2, 0);  /* button 2 = right */
+            return;
+        }
+    }
+    
+    /* Handle desktop left-click for icon selection - check BEFORE window checks */
+    if (left_click) {
+        /* Check context menu first */
+        if (desktop_is_context_menu_visible()) {
+            if (desktop_context_menu_click(x, y)) {
+                return;
+            }
+        }
+        
+        /* Check if click is on desktop area (not on window) */
+        int on_window = 0;
+        for (struct window *win = window_stack; win; win = win->next) {
+            if (!win->visible) continue;
+            if (x >= win->x && x < win->x + win->width &&
+                y >= win->y && y < win->y + win->height) {
+                on_window = 1;
+                break;
+            }
+        }
+        
+        if (!on_window && y > MENU_BAR_HEIGHT && y < (int)primary_display.height - DOCK_HEIGHT) {
+            /* Track double-click */
+            int dx = x - last_click_x;
+            int dy = y - last_click_y;
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            
+            if (dx < 10 && dy < 10) {
+                click_count++;
+                if (click_count >= 2) {
+                    /* Double click - open item */
+                    desktop_handle_double_click(x, y);
+                    click_count = 0;
+                    return;
+                }
+            } else {
+                click_count = 1;
+            }
+            last_click_x = x;
+            last_click_y = y;
+            
+            /* Single click - select icon */
+            int shift_held = 0;
+            if (desktop_handle_click(x, y, 1, shift_held)) {
+                return;  /* Click was on desktop icon */
+            }
+        }
+    }
+    
     /* Check if clicking on a window */
     if (!left_click) return;
     
@@ -2831,73 +2900,6 @@ void gui_handle_mouse_event(int x, int y, int buttons)
             icon_x += DOCK_ICON_SIZE + DOCK_PADDING;
         }
     }
-    
-    /* Handle desktop right-click (context menu) */
-    if (right_click) {
-        /* Check if right-click is on desktop area (not on window, menu bar, or dock) */
-        int on_window = 0;
-        for (struct window *win = window_stack; win; win = win->next) {
-            if (!win->visible) continue;
-            if (x >= win->x && x < win->x + win->width &&
-                y >= win->y && y < win->y + win->height) {
-                on_window = 1;
-                break;
-            }
-        }
-        
-        if (!on_window && y > MENU_BAR_HEIGHT && y < (int)primary_display.height - DOCK_HEIGHT) {
-            /* Right-click on desktop - handle in desktop manager */
-            desktop_handle_click(x, y, 2, 0);  /* button 2 = right */
-            return;
-        }
-    }
-    
-    /* Handle desktop left-click for icon selection */
-    if (left_click) {
-        /* Check context menu first */
-        if (desktop_is_context_menu_visible()) {
-            if (desktop_context_menu_click(x, y)) {
-                return;
-            }
-        }
-        
-        /* Check if click is on desktop area */
-        int on_window = 0;
-        for (struct window *win = window_stack; win; win = win->next) {
-            if (!win->visible) continue;
-            if (x >= win->x && x < win->x + win->width &&
-                y >= win->y && y < win->y + win->height) {
-                on_window = 1;
-                break;
-            }
-        }
-        
-        if (!on_window && y > MENU_BAR_HEIGHT && y < (int)primary_display.height - DOCK_HEIGHT) {
-            /* Track double-click */
-            int dx = x - last_click_x;
-            int dy = y - last_click_y;
-            if (dx < 0) dx = -dx;
-            if (dy < 0) dy = -dy;
-            
-            if (dx < 10 && dy < 10) {
-                click_count++;
-                if (click_count >= 2) {
-                    /* Double click - open item */
-                    desktop_handle_double_click(x, y);
-                    click_count = 0;
-                    return;
-                }
-            } else {
-                click_count = 1;
-            }
-            last_click_x = x;
-            last_click_y = y;
-            
-            /* Single click - select icon */
-            int shift_held = 0; /* TODO: Get shift key state */
-            desktop_handle_click(x, y, 1, shift_held);
-        }
-    }
 }
 
 /* ===================================================================== */
@@ -2940,6 +2942,16 @@ struct display *gui_get_display(void)
     return &primary_display;
 }
 
+uint32_t gui_get_screen_width(void)
+{
+    return primary_display.width;
+}
+
+uint32_t gui_get_screen_height(void)
+{
+    return primary_display.height;
+}
+
 struct window *gui_create_file_manager(int x, int y)
 {
     struct window *win = gui_create_window("File Manager", x, y, 450, 350);
@@ -2947,6 +2959,43 @@ struct window *gui_create_file_manager(int x, int y)
         struct fm_state *st = kmalloc(sizeof(struct fm_state));
         if (st) {
             st->path[0] = '/'; st->path[1] = '\0';
+            st->selected[0] = '\0';
+            st->scroll_y = 0;
+            win->userdata = st;
+            win->on_mouse = fm_on_mouse;
+        }
+    }
+    return win;
+}
+
+/* Create file manager at specific path */
+struct window *gui_create_file_manager_path(int x, int y, const char *path)
+{
+    /* Build title with path */
+    char title[128] = "File Manager - ";
+    int ti = 15;
+    if (path) {
+        for (int i = 0; path[i] && ti < 126; i++) {
+            title[ti++] = path[i];
+        }
+    }
+    title[ti] = '\0';
+    
+    struct window *win = gui_create_window(title, x, y, 450, 350);
+    if (win) {
+        struct fm_state *st = kmalloc(sizeof(struct fm_state));
+        if (st) {
+            /* Copy the provided path */
+            if (path) {
+                int i = 0;
+                while (path[i] && i < 255) {
+                    st->path[i] = path[i];
+                    i++;
+                }
+                st->path[i] = '\0';
+            } else {
+                st->path[0] = '/'; st->path[1] = '\0';
+            }
             st->selected[0] = '\0';
             st->scroll_y = 0;
             win->userdata = st;
