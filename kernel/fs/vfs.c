@@ -406,8 +406,85 @@ loff_t vfs_lseek(struct file *file, loff_t offset, int whence)
     return new_pos;
 }
 
-int vfs_rmdir(const char *path) { (void)path; return -ENOSYS; }
-int vfs_unlink(const char *path) { (void)path; return -ENOSYS; }
+int vfs_rmdir(const char *path)
+{
+    char name[NAME_MAX + 1];
+    struct dentry *parent = vfs_lookup_parent(path, name);
+    if (!parent) return -ENOENT;
+    
+    struct dentry *child = kzalloc(sizeof(struct dentry), GFP_KERNEL);
+    if (!child) return -ENOMEM;
+    
+    int i;
+    for (i = 0; i < NAME_MAX && name[i]; i++) child->d_name[i] = name[i];
+    child->d_name[i] = '\0';
+    
+    /* Lookup the target */
+    if (parent->d_inode->i_op && parent->d_inode->i_op->lookup) {
+        parent->d_inode->i_op->lookup(parent->d_inode, child);
+    }
+    
+    if (!child->d_inode) {
+        kfree(child);
+        return -ENOENT;
+    }
+    
+    /* Must be a directory */
+    if (!S_ISDIR(child->d_inode->i_mode)) {
+        kfree(child);
+        return -ENOTDIR;
+    }
+    
+    /* Check if rmdir operation is supported */
+    if (!parent->d_inode->i_op || !parent->d_inode->i_op->rmdir) {
+        kfree(child);
+        return -EPERM;
+    }
+    
+    int ret = parent->d_inode->i_op->rmdir(parent->d_inode, child);
+    kfree(child);
+    return ret;
+}
+
+int vfs_unlink(const char *path)
+{
+    char name[NAME_MAX + 1];
+    struct dentry *parent = vfs_lookup_parent(path, name);
+    if (!parent) return -ENOENT;
+    
+    struct dentry *child = kzalloc(sizeof(struct dentry), GFP_KERNEL);
+    if (!child) return -ENOMEM;
+    
+    int i;
+    for (i = 0; i < NAME_MAX && name[i]; i++) child->d_name[i] = name[i];
+    child->d_name[i] = '\0';
+    
+    /* Lookup the target */
+    if (parent->d_inode->i_op && parent->d_inode->i_op->lookup) {
+        parent->d_inode->i_op->lookup(parent->d_inode, child);
+    }
+    
+    if (!child->d_inode) {
+        kfree(child);
+        return -ENOENT;
+    }
+    
+    /* Must not be a directory (use rmdir for that) */
+    if (S_ISDIR(child->d_inode->i_mode)) {
+        kfree(child);
+        return -EISDIR;
+    }
+    
+    /* Check if unlink operation is supported */
+    if (!parent->d_inode->i_op || !parent->d_inode->i_op->unlink) {
+        kfree(child);
+        return -EPERM;
+    }
+    
+    int ret = parent->d_inode->i_op->unlink(parent->d_inode, child);
+    kfree(child);
+    return ret;
+}
 int vfs_rename(const char *old, const char *new)
 {
     char old_name_buf[NAME_MAX + 1];

@@ -11,6 +11,7 @@
 #include "icons.h"            /* Icon bitmaps */
 #include "fs/vfs.h"        /* VFS headers */
 #include "media/media.h"
+#include "desktop.h"       /* Desktop manager */
 
 struct window *gui_create_file_manager(int x, int y);
 void gui_open_notepad(const char *path);
@@ -2094,6 +2095,9 @@ static void draw_desktop(void)
     /* Draw beautiful gradient wallpaper */
     draw_wallpaper();
     
+    /* Draw desktop icons */
+    desktop_draw_icons();
+    
     /* Draw menu bar at top (glass effect) */
     draw_menu_bar();
     
@@ -2102,11 +2106,85 @@ static void draw_desktop(void)
 }
 
 /* ===================================================================== */
-/* Compositor - Draw everything */
+/* Compositor - Draw everything with dirty region optimization */
 /* ===================================================================== */
+
+/* Dirty region tracking for compositor */
+#define MAX_DIRTY_REGIONS 32
+typedef struct {
+    int x, y, w, h;
+    int valid;
+} compositor_dirty_rect_t;
+
+static compositor_dirty_rect_t g_dirty_regions[MAX_DIRTY_REGIONS];
+static int g_dirty_count = 0;
+static int g_full_redraw = 1;  /* Start with full redraw */
+static int g_frame_count = 0;
+
+/* Mark a region as needing update */
+void compositor_mark_dirty(int x, int y, int w, int h)
+{
+    if (g_dirty_count < MAX_DIRTY_REGIONS) {
+        g_dirty_regions[g_dirty_count].x = x;
+        g_dirty_regions[g_dirty_count].y = y;
+        g_dirty_regions[g_dirty_count].w = w;
+        g_dirty_regions[g_dirty_count].h = h;
+        g_dirty_regions[g_dirty_count].valid = 1;
+        g_dirty_count++;
+    } else {
+        g_full_redraw = 1;
+    }
+}
+
+void compositor_mark_full_redraw(void)
+{
+    g_full_redraw = 1;
+    g_dirty_count = 0;
+}
+
+/* Optimized memcpy for scanlines */
+static inline void fast_memcpy_line(uint32_t *dst, uint32_t *src, int width)
+{
+    /* Use 64-bit copies for better performance */
+    uint64_t *d64 = (uint64_t *)dst;
+    uint64_t *s64 = (uint64_t *)src;
+    int count = width / 2;
+    
+    for (int i = 0; i < count; i++) {
+        d64[i] = s64[i];
+    }
+    
+    /* Handle odd pixel */
+    if (width & 1) {
+        dst[width - 1] = src[width - 1];
+    }
+}
+
+/* Copy a specific region from backbuffer to framebuffer */
+static void blit_region(int x, int y, int w, int h)
+{
+    if (!primary_display.backbuffer || !primary_display.framebuffer) return;
+    
+    /* Clip to screen bounds */
+    if (x < 0) { w += x; x = 0; }
+    if (y < 0) { h += y; y = 0; }
+    if (x + w > (int)primary_display.width) w = primary_display.width - x;
+    if (y + h > (int)primary_display.height) h = primary_display.height - y;
+    if (w <= 0 || h <= 0) return;
+    
+    int pitch_pixels = primary_display.pitch / 4;
+    
+    for (int row = y; row < y + h; row++) {
+        uint32_t *src = primary_display.backbuffer + row * pitch_pixels + x;
+        uint32_t *dst = primary_display.framebuffer + row * pitch_pixels + x;
+        fast_memcpy_line(dst, src, w);
+    }
+}
 
 void gui_compose(void)
 {
+    g_frame_count++;
+    
     /* Draw desktop and taskbar */
     draw_desktop();
     
@@ -2118,15 +2196,6 @@ void gui_compose(void)
     }
     
     /* Draw windows from bottom to top (reverse order) */
-    /* First, find tail of list */
-    struct window *tail = NULL;
-    for (struct window *win = window_stack; win; win = win->next) {
-        tail = win;
-    }
-    (void)tail;
-    
-    /* Draw from tail to head */
-    /* For simplicity, just iterate normally (top window drawn last) */
     struct window *draw_order[MAX_WINDOWS];
     int count = 0;
     for (struct window *win = window_stack; win && count < MAX_WINDOWS; win = win->next) {
@@ -2138,36 +2207,56 @@ void gui_compose(void)
         draw_window(draw_order[i]);
     }
     
-    /* Ultra-fast copy backbuffer to framebuffer using unrolled 64-bit transfers */
+    /* Smart frame buffer update */
     if (primary_display.backbuffer && primary_display.framebuffer) {
-        uint64_t *src = (uint64_t *)primary_display.backbuffer;
-        uint64_t *dst = (uint64_t *)primary_display.framebuffer;
-        size_t count64 = (primary_display.pitch * primary_display.height) / 8;
-        size_t i = 0;
-        
-        /* Unrolled copy - 8 qwords (64 bytes / 16 pixels) per iteration */
-        size_t fast_count = count64 & ~7UL;  /* Round down to multiple of 8 */
-        for (; i < fast_count; i += 8) {
-            dst[i]   = src[i];
-            dst[i+1] = src[i+1];
-            dst[i+2] = src[i+2];
-            dst[i+3] = src[i+3];
-            dst[i+4] = src[i+4];
-            dst[i+5] = src[i+5];
-            dst[i+6] = src[i+6];
-            dst[i+7] = src[i+7];
+        if (g_full_redraw || g_dirty_count == 0) {
+            /* Full frame update - use ultra-fast unrolled copy */
+            uint64_t *src = (uint64_t *)primary_display.backbuffer;
+            uint64_t *dst = (uint64_t *)primary_display.framebuffer;
+            size_t count64 = (primary_display.pitch * primary_display.height) / 8;
+            size_t i = 0;
+            
+            /* Unrolled copy - 8 qwords (64 bytes / 16 pixels) per iteration */
+            size_t fast_count = count64 & ~7UL;
+            for (; i < fast_count; i += 8) {
+                dst[i]   = src[i];
+                dst[i+1] = src[i+1];
+                dst[i+2] = src[i+2];
+                dst[i+3] = src[i+3];
+                dst[i+4] = src[i+4];
+                dst[i+5] = src[i+5];
+                dst[i+6] = src[i+6];
+                dst[i+7] = src[i+7];
+            }
+            for (; i < count64; i++) {
+                dst[i] = src[i];
+            }
+            
+            g_full_redraw = 0;
+        } else {
+            /* Partial update - only copy dirty regions */
+            for (int d = 0; d < g_dirty_count; d++) {
+                if (g_dirty_regions[d].valid) {
+                    blit_region(g_dirty_regions[d].x, g_dirty_regions[d].y,
+                               g_dirty_regions[d].w, g_dirty_regions[d].h);
+                }
+            }
         }
-        /* Handle remaining */
-        for (; i < count64; i++) {
-            dst[i] = src[i];
-        }
         
-        /* Memory barrier to ensure writes are visible before next frame */
+        /* Memory barrier */
 #ifdef ARCH_ARM64
         asm volatile("dsb sy" ::: "memory");
 #elif defined(ARCH_X86_64) || defined(ARCH_X86)
         asm volatile("mfence" ::: "memory");
 #endif
+    }
+    
+    /* Clear dirty regions for next frame */
+    g_dirty_count = 0;
+    
+    /* Force full redraw periodically to catch any missed updates */
+    if ((g_frame_count & 0x3F) == 0) {  /* Every 64 frames */
+        g_full_redraw = 1;
     }
 }
 
@@ -2381,6 +2470,17 @@ void gui_handle_mouse_event(int x, int y, int buttons)
     int left_click = (buttons & 1) && !(prev_buttons & 1);  /* Just pressed */
     int left_held = (buttons & 1);
     int left_release = !(buttons & 1) && (prev_buttons & 1);
+    int right_click = (buttons & 2) && !(prev_buttons & 2); /* Right button */
+    
+    /* Handle context menu hover */
+    if (desktop_is_context_menu_visible()) {
+        desktop_context_menu_hover(x, y);
+    }
+    
+    /* Track for double-click detection */
+    static int last_click_x = 0, last_click_y = 0;
+    static uint64_t last_click_time = 0;
+    static int click_count = 0;
     
     /* Handle window dragging */
     if (dragging_window && left_held) {
@@ -2731,6 +2831,73 @@ void gui_handle_mouse_event(int x, int y, int buttons)
             icon_x += DOCK_ICON_SIZE + DOCK_PADDING;
         }
     }
+    
+    /* Handle desktop right-click (context menu) */
+    if (right_click) {
+        /* Check if right-click is on desktop area (not on window, menu bar, or dock) */
+        int on_window = 0;
+        for (struct window *win = window_stack; win; win = win->next) {
+            if (!win->visible) continue;
+            if (x >= win->x && x < win->x + win->width &&
+                y >= win->y && y < win->y + win->height) {
+                on_window = 1;
+                break;
+            }
+        }
+        
+        if (!on_window && y > MENU_BAR_HEIGHT && y < (int)primary_display.height - DOCK_HEIGHT) {
+            /* Right-click on desktop - handle in desktop manager */
+            desktop_handle_click(x, y, 2, 0);  /* button 2 = right */
+            return;
+        }
+    }
+    
+    /* Handle desktop left-click for icon selection */
+    if (left_click) {
+        /* Check context menu first */
+        if (desktop_is_context_menu_visible()) {
+            if (desktop_context_menu_click(x, y)) {
+                return;
+            }
+        }
+        
+        /* Check if click is on desktop area */
+        int on_window = 0;
+        for (struct window *win = window_stack; win; win = win->next) {
+            if (!win->visible) continue;
+            if (x >= win->x && x < win->x + win->width &&
+                y >= win->y && y < win->y + win->height) {
+                on_window = 1;
+                break;
+            }
+        }
+        
+        if (!on_window && y > MENU_BAR_HEIGHT && y < (int)primary_display.height - DOCK_HEIGHT) {
+            /* Track double-click */
+            int dx = x - last_click_x;
+            int dy = y - last_click_y;
+            if (dx < 0) dx = -dx;
+            if (dy < 0) dy = -dy;
+            
+            if (dx < 10 && dy < 10) {
+                click_count++;
+                if (click_count >= 2) {
+                    /* Double click - open item */
+                    desktop_handle_double_click(x, y);
+                    click_count = 0;
+                    return;
+                }
+            } else {
+                click_count = 1;
+            }
+            last_click_x = x;
+            last_click_y = y;
+            
+            /* Single click - select icon */
+            int shift_held = 0; /* TODO: Get shift key state */
+            desktop_handle_click(x, y, 1, shift_held);
+        }
+    }
 }
 
 /* ===================================================================== */
@@ -2759,6 +2926,9 @@ int gui_init(uint32_t *framebuffer, uint32_t width, uint32_t height, uint32_t pi
     for (int i = 0; i < MAX_WINDOWS; i++) {
         windows[i].id = 0;
     }
+    
+    /* Initialize desktop manager */
+    desktop_manager_init();
     
     printk(KERN_INFO "GUI: Display %ux%u initialized\n", width, height);
     

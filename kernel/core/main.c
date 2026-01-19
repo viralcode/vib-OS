@@ -189,6 +189,15 @@ static void init_subsystems(void *dtb)
     ramfs_create_dir("Downloads", 0755);
     ramfs_create_dir("Pictures", 0755);
     ramfs_create_dir("System", 0755);
+    ramfs_create_dir("Desktop", 0755);
+    
+    /* Seed Desktop with sample files and folders */
+    ramfs_create_file("/Desktop/notes.txt", 0644, "Welcome to Vib-OS!\n\nThis is your desktop - right-click for options!\n");
+    ramfs_create_file("/Desktop/readme.txt", 0644, "Vib-OS Desktop Manager\n\n- Double-click to open files\n- Right-click for context menu\n");
+    
+    /* Create a subfolder on Desktop */
+    extern int vfs_mkdir(const char *path, mode_t mode);
+    vfs_mkdir("/Desktop/Projects", 0755);
     ramfs_create_file("readme.txt", 0644, "Welcome to Vib-OS!\nThis is a real file in RamFS.");
     ramfs_create_file("todo.txt", 0644, "- Implement Browser\n- Fix Bugs\n- Sleep");
     ramfs_create_file_bytes("sample.mp3", 0644, vib_seed_mp3, vib_seed_mp3_len);
