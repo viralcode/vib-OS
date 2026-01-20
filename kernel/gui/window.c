@@ -6,11 +6,13 @@
 
 #include "../core/process.h" /* For Doom launch */
 #include "desktop.h"         /* Desktop manager */
+#include "dock_icons.h"      /* Dock icons (PNG-based) */
 #include "fs/vfs.h"          /* VFS headers */
 #include "icons.h"           /* Icon bitmaps */
 #include "media/media.h"
 #include "mm/kmalloc.h"
 #include "printk.h"
+#include "toolbar_icons.h" /* Toolbar icons for image viewer */
 #include "types.h"
 
 struct window *gui_create_file_manager(int x, int y);
@@ -879,6 +881,37 @@ struct image_viewer_state {
   media_image_t image;
 };
 
+/* Forward declarations for modern image viewer (defined later in file) */
+struct modern_image_viewer_state;
+static struct {
+  media_image_t image;
+  media_image_t rotated;
+  int loaded;
+  int zoom_pct;
+  int offset_x;
+  int offset_y;
+  int dragging;
+  int drag_start_x;
+  int drag_start_y;
+  char current_file[256];
+  int current_image_index;
+  int rotation;
+  int fullscreen;
+  int show_toolbar;
+  int toolbar_timer;
+  int crop_mode;
+  int crop_x1, crop_y1;
+  int crop_x2, crop_y2;
+  /* Folder-based navigation */
+  char folder_path[256];
+  char file_list[32][64]; /* Up to 32 files, 64 chars each */
+  int file_count;
+  int file_index; /* Current index in folder */
+} g_imgview = {0};
+static void image_viewer_on_draw(struct window *win);
+static void image_viewer_on_mouse(struct window *win, int x, int y,
+                                  int buttons);
+
 void gui_open_image_viewer(const char *path);
 static void gui_play_mp3_file(const char *path);
 
@@ -1239,7 +1272,8 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
     if (str_ends_with_ci(st->selected, ".txt")) {
       gui_open_notepad(full_path);
     } else if (str_ends_with_ci(st->selected, ".jpg") ||
-               str_ends_with_ci(st->selected, ".jpeg")) {
+               str_ends_with_ci(st->selected, ".jpeg") ||
+               str_ends_with_ci(st->selected, ".png")) {
       gui_open_image_viewer(full_path);
     } else if (str_ends_with_ci(st->selected, ".mp3")) {
       gui_play_mp3_file(full_path);
@@ -1359,6 +1393,7 @@ void gui_open_image_viewer(const char *path) {
   if (!path)
     return;
 
+  /* Load image file */
   uint8_t *data = NULL;
   size_t size = 0;
   if (media_load_file(path, &data, &size) != 0) {
@@ -1366,43 +1401,116 @@ void gui_open_image_viewer(const char *path) {
     return;
   }
 
-  struct image_viewer_state *st =
-      kmalloc(sizeof(struct image_viewer_state), GFP_KERNEL);
-  if (!st) {
-    media_free_file(data);
-    return;
+  /* Free previous image if loaded */
+  if (g_imgview.loaded) {
+    media_free_image(&g_imgview.image);
+    g_imgview.loaded = 0;
   }
-  st->image.pixels = NULL;
-  st->image.width = 0;
-  st->image.height = 0;
 
-  if (media_decode_jpeg(data, size, &st->image) != 0) {
-    printk("Image Viewer: JPEG decode failed\n");
+  /* Decode new image into global state - detect format by magic bytes */
+  int decode_ret = -1;
+  /* PNG magic: 0x89 'P' 'N' 'G' */
+  if (size >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
+      data[3] == 'G') {
+    decode_ret = media_decode_png(data, size, &g_imgview.image);
+    if (decode_ret != 0) {
+      printk("Image Viewer: PNG decode failed\n");
+    }
+  } else {
+    /* Assume JPEG */
+    decode_ret = media_decode_jpeg(data, size, &g_imgview.image);
+    if (decode_ret != 0) {
+      printk("Image Viewer: JPEG decode failed\n");
+    }
+  }
+  if (decode_ret != 0) {
     media_free_file(data);
-    kfree(st);
     return;
   }
   media_free_file(data);
 
-  int win_w = st->image.width + 40;
-  int win_h = st->image.height + 60;
-  if (win_w < 320)
-    win_w = 320;
-  if (win_h < 240)
-    win_h = 240;
-  if (win_w > (int)primary_display.width - 40)
-    win_w = primary_display.width - 40;
-  if (win_h > (int)primary_display.height - 40)
-    win_h = primary_display.height - 40;
+  /* Set up viewer state */
+  g_imgview.loaded = 1;
+  g_imgview.zoom_pct = 0; /* Auto-fit */
+  g_imgview.offset_x = 0;
+  g_imgview.offset_y = 0;
+  g_imgview.rotation = 0;
+  g_imgview.fullscreen = 0;
+  g_imgview.current_image_index = -1; /* -1 means file-loaded, not bootstrap */
 
-  struct window *win =
-      gui_create_window("Image Viewer", 120, 120, win_w, win_h);
+  /* Extract folder path and filename */
+  int i = 0;
+  int last_slash = -1;
+  while (path[i]) {
+    if (path[i] == '/')
+      last_slash = i;
+    i++;
+  }
+
+  /* Copy folder path */
+  for (int j = 0; j <= last_slash && j < 255; j++) {
+    g_imgview.folder_path[j] = path[j];
+  }
+  g_imgview.folder_path[last_slash + 1] = '\0';
+
+  /* Copy filename */
+  const char *filename = path + last_slash + 1;
+  i = 0;
+  while (filename[i] && i < 255) {
+    g_imgview.current_file[i] = filename[i];
+    i++;
+  }
+  g_imgview.current_file[i] = '\0';
+
+  /* Scan folder for image files - use hardcoded list for /Pictures */
+  g_imgview.file_count = 0;
+  g_imgview.file_index = 0;
+
+  /* Known image files in Pictures folder */
+  static const char *pictures_files[] = {
+      "test.png",      "pig.jpg",    "city.jpg",     "nature.jpg",
+      "wallpaper.jpg", "square.jpg", "portrait.jpg", "landscape.jpg"};
+  int num_pictures = sizeof(pictures_files) / sizeof(pictures_files[0]);
+
+  /* Check if we're in Pictures folder */
+  int is_pictures =
+      (g_imgview.folder_path[0] == '/' && g_imgview.folder_path[1] == 'P' &&
+       g_imgview.folder_path[2] == 'i' && g_imgview.folder_path[3] == 'c');
+
+  if (is_pictures) {
+    for (int j = 0; j < num_pictures && g_imgview.file_count < 32; j++) {
+      /* Copy filename to list */
+      int k = 0;
+      while (pictures_files[j][k] && k < 63) {
+        g_imgview.file_list[g_imgview.file_count][k] = pictures_files[j][k];
+        k++;
+      }
+      g_imgview.file_list[g_imgview.file_count][k] = '\0';
+
+      /* Check if this is current file */
+      int match = 1;
+      for (int m = 0; filename[m] || pictures_files[j][m]; m++) {
+        if (filename[m] != pictures_files[j][m]) {
+          match = 0;
+          break;
+        }
+      }
+      if (match) {
+        g_imgview.file_index = g_imgview.file_count;
+      }
+      g_imgview.file_count++;
+    }
+  }
+
+  printk("Image Viewer: Loaded %s (%dx%d) - %d images in folder\n",
+         g_imgview.current_file, g_imgview.image.width, g_imgview.image.height,
+         g_imgview.file_count);
+
+  /* Create modern viewer window */
+  struct window *win = gui_create_window("Image Viewer", 80, 60, 800, 600);
   if (win) {
-    win->userdata = st;
-    win->on_close = image_viewer_on_close;
-  } else {
-    media_free_image(&st->image);
-    kfree(st);
+    win->on_draw = image_viewer_on_draw;
+    win->on_mouse = image_viewer_on_mouse;
   }
 }
 
@@ -2685,145 +2793,187 @@ static void draw_icon_web(int x, int y, int size) {
 
 /* Draw dock with hover animations - using vector icons */
 static void draw_dock(void) {
-  int dock_content_w =
+  int mouse_active = (mouse_y >= primary_display.height - DOCK_HEIGHT - 40);
+
+  /* 1. Calculate target sizes for all icons based on magnification */
+  int icon_sizes[NUM_DOCK_ICONS];
+  static int smooth_sizes[NUM_DOCK_ICONS] = {0};
+
+  /* Initial base positions for hit testing (fixed grid for stability) */
+  int base_dock_w =
       NUM_DOCK_ICONS * (DOCK_ICON_SIZE + DOCK_PADDING) - DOCK_PADDING + 32;
-  int dock_x = (primary_display.width - dock_content_w) / 2;
-  int dock_y = primary_display.height - DOCK_HEIGHT + 6;
-  int dock_h = DOCK_HEIGHT - 12;
+  int base_dock_x = (primary_display.width - base_dock_w) / 2;
+  int base_y = primary_display.height - DOCK_HEIGHT + 6;
 
-  /* Dock background is now handled by the wallpaper extending down
-   * The glass dock effect will be drawn on top of the wallpaper */
-
-  /* Modern glass dock background with subtle glow */
-  /* Outer glow effect */
-  draw_rounded_rect(dock_x - 1, dock_y - 1, dock_content_w + 2, dock_h + 2, 15,
-                    0x2A2A3A);
-
-  /* Main dock background - darker, sleeker */
-  draw_rounded_rect(dock_x, dock_y, dock_content_w, dock_h, 14, 0x1E1E28);
-
-  /* Subtle inner highlight at top */
-  for (int i = dock_x + 14; i < dock_x + dock_content_w - 14; i++) {
-    draw_pixel(i, dock_y + 1, 0x3A3A4A);
-  }
-
-  /* Bottom border for depth */
-  for (int i = dock_x + 14; i < dock_x + dock_content_w - 14; i++) {
-    draw_pixel(i, dock_y + dock_h - 1, 0x14141A);
-  }
-
-  /* Draw icons */
-  int icon_x = dock_x + 16;
-  int center_y = dock_y + dock_h / 2;
+  int max_magnify = 42;    /* Max magnify */
+  int magnify_range = 140; /* Wider range for wave */
   int hovered_idx = -1;
 
   for (int i = 0; i < NUM_DOCK_ICONS; i++) {
-    int size = DOCK_ICON_SIZE;
+    int target = DOCK_ICON_SIZE;
+    /* Use fixed base positions for hit test stability so icons don't run away
+     */
+    int base_center_x = base_dock_x + 16 + i * (DOCK_ICON_SIZE + DOCK_PADDING) +
+                        DOCK_ICON_SIZE / 2;
 
-    /* Check hover */
-    if (mouse_y >= dock_y && mouse_y < dock_y + dock_h && mouse_x >= icon_x &&
-        mouse_x < icon_x + DOCK_ICON_SIZE) {
-      hovered_idx = i;
-      size = DOCK_ICON_SIZE + 12; /* Scale up on hover */
+    if (mouse_active) {
+      int dist = mouse_x - base_center_x;
+      if (dist < 0)
+        dist = -dist;
+
+      if (dist < magnify_range) {
+        /* Sine wave magnification: scale = (1 - dist/range)^2 */
+        int scale = (magnify_range - dist) * 256 / magnify_range;
+        scale = scale * scale / 256; /* Quadratic ease */
+        target += max_magnify * scale / 256;
+
+        if (dist < DOCK_ICON_SIZE / 2 + 5)
+          hovered_idx = i;
+      }
     }
 
-    int draw_x = icon_x - (size - DOCK_ICON_SIZE) / 2;
-    int draw_y = center_y - size / 2;
+    /* Smooth interpolation */
+    if (smooth_sizes[i] == 0)
+      smooth_sizes[i] = DOCK_ICON_SIZE;
+    int diff = target - smooth_sizes[i];
+    if (diff > 0)
+      smooth_sizes[i] += (diff > 8) ? 8 : diff;
+    else if (diff < 0)
+      smooth_sizes[i] += (diff < -8) ? -8 : diff;
 
-    /* Draw rounded square background */
+    icon_sizes[i] = smooth_sizes[i];
+  }
+
+  /* 2. Calculate dynamic total width */
+  int total_content_w = 0;
+  for (int i = 0; i < NUM_DOCK_ICONS; i++) {
+    total_content_w += icon_sizes[i];
+    if (i < NUM_DOCK_ICONS - 1)
+      total_content_w += DOCK_PADDING;
+  }
+  int dock_content_w = total_content_w; /* Used by old code too */
+  int dock_w = total_content_w + 32;    /* Padding */
+  int dock_h = DOCK_HEIGHT - 12;
+  int dock_x = (primary_display.width - dock_w) / 2;
+  int dock_y = base_y;
+
+  /* 3. Draw Background behind everything */
+  draw_rounded_rect(dock_x - 1, dock_y - 1, dock_w + 2, dock_h + 2, 16,
+                    0x2A2A3A);
+  draw_rounded_rect(dock_x, dock_y, dock_w, dock_h, 15, 0x1E1E28);
+  /* Highlights */
+  for (int i = dock_x + 14; i < dock_x + dock_w - 14; i++) {
+    draw_pixel(i, dock_y + 1, 0x3A3A4A);
+    draw_pixel(i, dock_y + dock_h - 1, 0x14141A);
+  }
+
+  /* 4. Determine Draw Order (Small -> Large) so large icons draw ON TOP of
+   * neighbors */
+  int draw_order[NUM_DOCK_ICONS];
+  for (int i = 0; i < NUM_DOCK_ICONS; i++)
+    draw_order[i] = i;
+
+  /* Bubble sort by size (stable) */
+  for (int i = 0; i < NUM_DOCK_ICONS - 1; i++) {
+    for (int j = 0; j < NUM_DOCK_ICONS - i - 1; j++) {
+      if (icon_sizes[draw_order[j]] > icon_sizes[draw_order[j + 1]]) {
+        int temp = draw_order[j];
+        draw_order[j] = draw_order[j + 1];
+        draw_order[j + 1] = temp;
+      }
+    }
+  }
+
+  /* 5. Draw Icons */
+  int center_y = dock_y + dock_h / 2;
+  int curr_x = dock_x + 16;
+
+  /* Calculate render centers first - strictly left-to-right based on dynamic
+   * width */
+  int render_centers[NUM_DOCK_ICONS];
+  for (int i = 0; i < NUM_DOCK_ICONS; i++) {
+    render_centers[i] = curr_x + icon_sizes[i] / 2;
+    curr_x += icon_sizes[i] + DOCK_PADDING;
+  }
+
+  for (int k = 0; k < NUM_DOCK_ICONS; k++) {
+    int i = draw_order[k]; /* Draw in sorted order */
+    int size = icon_sizes[i];
+    int cx = render_centers[i];
+    int cy = center_y - (size - DOCK_ICON_SIZE) / 2; /* Move up as it grows */
+
+    int draw_x = cx - size / 2;
+    int draw_y = cy - size / 2;
+
     int icon_r = size / 5;
     uint32_t bg_color = icon_colors[i];
 
-    /* Main background */
+    /* Icon Background */
     gui_draw_rect(draw_x + icon_r, draw_y, size - 2 * icon_r, size, bg_color);
     gui_draw_rect(draw_x, draw_y + icon_r, size, size - 2 * icon_r, bg_color);
-
-    /* Rounded corners */
-    for (int cy = -icon_r; cy <= icon_r; cy++) {
-      for (int cx = -icon_r; cx <= icon_r; cx++) {
-        if (cx * cx + cy * cy <= icon_r * icon_r) {
-          draw_pixel(draw_x + icon_r + cx, draw_y + icon_r + cy, bg_color);
-          draw_pixel(draw_x + size - icon_r - 1 + cx, draw_y + icon_r + cy,
+    /* Corners */
+    for (int dy = -icon_r; dy <= icon_r; dy++) {
+      for (int dx = -icon_r; dx <= icon_r; dx++) {
+        if (dx * dx + dy * dy <= icon_r * icon_r) {
+          draw_pixel(draw_x + icon_r + dx, draw_y + icon_r + dy, bg_color);
+          draw_pixel(draw_x + size - icon_r - 1 + dx, draw_y + icon_r + dy,
                      bg_color);
-          draw_pixel(draw_x + icon_r + cx, draw_y + size - icon_r - 1 + cy,
+          draw_pixel(draw_x + icon_r + dx, draw_y + size - icon_r - 1 + dy,
                      bg_color);
-          draw_pixel(draw_x + size - icon_r - 1 + cx,
-                     draw_y + size - icon_r - 1 + cy, bg_color);
+          draw_pixel(draw_x + size - icon_r - 1 + dx,
+                     draw_y + size - icon_r - 1 + dy, bg_color);
         }
       }
     }
 
-    /* Glossy highlight at top */
-    for (int gx = draw_x + icon_r; gx < draw_x + size - icon_r; gx++) {
-      uint32_t highlight = bg_color + 0x202020;
-      draw_pixel(gx, draw_y + 2, highlight);
-      draw_pixel(gx, draw_y + 3, highlight);
+    /* Top Highlight */
+    for (int x = draw_x + icon_r; x < draw_x + size - icon_r; x++) {
+      draw_pixel(x, draw_y + 2, bg_color + 0x202020);
+      draw_pixel(x, draw_y + 3, bg_color + 0x202020);
     }
 
-    /* Draw the vector icon */
-    switch (i) {
-    case 0:
-      draw_icon_terminal(draw_x, draw_y, size);
-      break;
-    case 1:
-      draw_icon_files(draw_x, draw_y, size);
-      break;
-    case 2:
-      draw_icon_calc(draw_x, draw_y, size);
-      break;
-    case 3:
-      draw_icon_notes(draw_x, draw_y, size);
-      break;
-    case 4:
-      draw_icon_settings(draw_x, draw_y, size);
-      break;
-    case 5:
-      draw_icon_clock(draw_x, draw_y, size);
-      break;
-    case 6:
-      draw_icon_doom(draw_x, draw_y, size);
-      break;
-    case 7:
-      draw_icon_snake(draw_x, draw_y, size);
-      break;
-    case 8:
-      draw_icon_help(draw_x, draw_y, size);
-      break;
-    case 9:
-      draw_icon_web(draw_x, draw_y, size);
-      break;
-    }
+    /* Bitmap Icon */
+    if (i < 10) {
+      const uint32_t *icon_data = dock_icons[i];
+      int bmp_size = size * 3 / 4;
+      int offset = (size - bmp_size) / 2;
+      for (int dy = 0; dy < bmp_size; dy++) {
+        for (int dx = 0; dx < bmp_size; dx++) {
+          int sx = dx * DOCK_ICON_BITMAP_SIZE / bmp_size;
+          int sy = dy * DOCK_ICON_BITMAP_SIZE / bmp_size;
+          if (sx >= DOCK_ICON_BITMAP_SIZE)
+            sx = DOCK_ICON_BITMAP_SIZE - 1;
+          if (sy >= DOCK_ICON_BITMAP_SIZE)
+            sy = DOCK_ICON_BITMAP_SIZE - 1;
 
-    icon_x += DOCK_ICON_SIZE + DOCK_PADDING;
+          uint32_t px = icon_data[sy * DOCK_ICON_BITMAP_SIZE + sx];
+          if ((px >> 24) > 128) {
+            draw_pixel(draw_x + offset + dx, draw_y + offset + dy,
+                       px & 0xFFFFFF);
+          }
+        }
+      }
+    }
   }
 
   /* Draw label for hovered item on top */
   if (hovered_idx >= 0) {
     const char *label = dock_labels[hovered_idx];
+    int idx_x = render_centers[hovered_idx];
 
-    /* Re-calculate position for this icon */
-    int idx_x = dock_x + 16 + hovered_idx * (DOCK_ICON_SIZE + DOCK_PADDING);
-    int size = DOCK_ICON_SIZE + 16;
-    int draw_x = idx_x - (size - DOCK_ICON_SIZE) / 2;
-    int draw_y = center_y - size / 2;
-
-    /* Label box above icon */
     int label_len = 0;
     while (label[label_len])
       label_len++;
     int label_w = label_len * 8 + 16;
     int label_h = 24;
-    int label_x = draw_x + (size - label_w) / 2;
-    int label_y = draw_y - 30;
+    int label_x = idx_x - label_w / 2;
+    int label_y = base_y - 45; /* Fixed height above dock */
 
-    /* Draw label background */
     draw_rounded_rect(label_x, label_y, label_w, label_h, 6, 0x303040);
     gui_draw_rect_outline(label_x, label_y, label_w, label_h, 0x505060, 1);
-
-    /* Draw text */
     gui_draw_string(label_x + 8, label_y + 4, label, 0xFFFFFF, 0x303040);
 
-    /* Little triangle pointing down */
+    /* Triangle */
     int tri_x = label_x + label_w / 2;
     int tri_y = label_y + label_h;
     for (int i = 0; i < 4; i++) {
@@ -3187,6 +3337,33 @@ void gui_handle_key_event(int key) {
              focused_window->title[1] == 'n' &&
              focused_window->title[2] == 'a') {
       snake_key(key);
+    }
+    /* Check if it's an Image Viewer window */
+    else if (focused_window->title[0] == 'I' &&
+             focused_window->title[1] == 'm' &&
+             focused_window->title[2] == 'a') {
+      /* ESC key (27) - exit fullscreen */
+      if (key == 27 && g_imgview.fullscreen) {
+        g_imgview.fullscreen = 0;
+        g_imgview.zoom_pct = 0;
+        g_imgview.offset_x = 0;
+        g_imgview.offset_y = 0;
+      }
+      /* F key - toggle fullscreen */
+      else if (key == 'f' || key == 'F') {
+        g_imgview.fullscreen = !g_imgview.fullscreen;
+        g_imgview.zoom_pct = 0;
+        g_imgview.offset_x = 0;
+        g_imgview.offset_y = 0;
+      }
+      /* R key - rotate right */
+      else if (key == 'r' || key == 'R') {
+        g_imgview.rotation = (g_imgview.rotation + 90) % 360;
+      }
+      /* L key - rotate left */
+      else if (key == 'l' || key == 'L') {
+        g_imgview.rotation = (g_imgview.rotation + 270) % 360;
+      }
     }
     /* Call window's key handler if set */
     if (focused_window->on_key) {
@@ -4115,21 +4292,12 @@ extern const unsigned char bootstrap_square_jpg[];
 extern const unsigned int bootstrap_square_jpg_len;
 extern const unsigned char bootstrap_wallpaper_jpg[];
 extern const unsigned int bootstrap_wallpaper_jpg_len;
+extern const unsigned char bootstrap_test_png[];
+extern const unsigned int bootstrap_test_png_len;
 
-static struct {
-  media_image_t image;
-  int loaded;
-  int zoom_pct; /* Zoom as percentage: 100 = 100% = 1x, 200 = 2x, etc. */
-  int offset_x;
-  int offset_y;
-  int dragging;
-  int drag_start_x;
-  int drag_start_y;
-  char current_file[256];
-  int current_image_index;
-} image_viewer_state = {0};
+/* g_imgview is already defined as extern earlier in the file */
 
-#define NUM_BOOTSTRAP_IMAGES 4
+#define NUM_BOOTSTRAP_IMAGES 5
 
 static const unsigned char *get_bootstrap_image_data(int index) {
   switch (index) {
@@ -4141,6 +4309,8 @@ static const unsigned char *get_bootstrap_image_data(int index) {
     return bootstrap_square_jpg;
   case 3:
     return bootstrap_wallpaper_jpg;
+  case 4:
+    return bootstrap_test_png;
   default:
     return NULL;
   }
@@ -4156,13 +4326,16 @@ static unsigned int get_bootstrap_image_len(int index) {
     return bootstrap_square_jpg_len;
   case 3:
     return bootstrap_wallpaper_jpg_len;
+  case 4:
+    return bootstrap_test_png_len;
   default:
     return 0;
   }
 }
 
 static const char *get_bootstrap_image_name(int index) {
-  static const char *names[] = {"Landscape", "Portrait", "Square", "Wallpaper"};
+  static const char *names[] = {"Landscape", "Portrait", "Square", "Wallpaper",
+                                "PNG Test"};
   if (index >= 0 && index < NUM_BOOTSTRAP_IMAGES)
     return names[index];
   return "Unknown";
@@ -4173,274 +4346,478 @@ static void image_viewer_load_bootstrap(int index) {
     return;
 
   /* Free previous image */
-  if (image_viewer_state.loaded) {
-    media_free_image(&image_viewer_state.image);
+  if (g_imgview.loaded) {
+    media_free_image(&g_imgview.image);
   }
 
-  /* Decode image */
+  /* Decode image - detect format by magic bytes */
   const unsigned char *data = get_bootstrap_image_data(index);
   unsigned int len = get_bootstrap_image_len(index);
-  int ret = media_decode_jpeg(data, len, &image_viewer_state.image);
+  int ret = -1;
+  /* PNG magic: 0x89 'P' 'N' 'G' */
+  if (len >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
+      data[3] == 'G') {
+    ret = media_decode_png(data, len, &g_imgview.image);
+  } else {
+    ret = media_decode_jpeg(data, len, &g_imgview.image);
+  }
 
   if (ret == 0) {
-    image_viewer_state.loaded = 1;
-    image_viewer_state.zoom_pct = 100;
-    image_viewer_state.offset_x = 0;
-    image_viewer_state.offset_y = 0;
-    image_viewer_state.current_image_index = index;
+    g_imgview.loaded = 1;
+    g_imgview.zoom_pct = 100;
+    g_imgview.offset_x = 0;
+    g_imgview.offset_y = 0;
+    g_imgview.current_image_index = index;
 
     int i = 0;
     const char *name = get_bootstrap_image_name(index);
     while (name[i] && i < 255) {
-      image_viewer_state.current_file[i] = name[i];
+      g_imgview.current_file[i] = name[i];
       i++;
     }
-    image_viewer_state.current_file[i] = '\0';
+    g_imgview.current_file[i] = '\0';
 
     printk(KERN_INFO "Image Viewer: Loaded %s (%dx%d)\n",
-           get_bootstrap_image_name(index), image_viewer_state.image.width,
-           image_viewer_state.image.height);
+           get_bootstrap_image_name(index), g_imgview.image.width,
+           g_imgview.image.height);
   } else {
     printk(KERN_ERR "Image Viewer: Failed to load image\n");
-    image_viewer_state.loaded = 0;
+    g_imgview.loaded = 0;
+  }
+}
+
+/* Load image from folder file list */
+static void image_viewer_load_from_folder(int index) {
+  if (index < 0 || index >= g_imgview.file_count)
+    return;
+
+  /* Build full path */
+  char full_path[512];
+  int pi = 0;
+  for (int i = 0; g_imgview.folder_path[i] && pi < 500; i++) {
+    full_path[pi++] = g_imgview.folder_path[i];
+  }
+  for (int i = 0; g_imgview.file_list[index][i] && pi < 511; i++) {
+    full_path[pi++] = g_imgview.file_list[index][i];
+  }
+  full_path[pi] = '\0';
+
+  /* Load image file */
+  uint8_t *data = NULL;
+  size_t size = 0;
+  if (media_load_file(full_path, &data, &size) != 0) {
+    printk(KERN_ERR "Image Viewer: Failed to read %s\n", full_path);
+    return;
+  }
+
+  /* Free previous image */
+  if (g_imgview.loaded) {
+    media_free_image(&g_imgview.image);
+  }
+
+  /* Decode image */
+  int ret = -1;
+  if (size >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
+      data[3] == 'G') {
+    ret = media_decode_png(data, size, &g_imgview.image);
+  } else {
+    ret = media_decode_jpeg(data, size, &g_imgview.image);
+  }
+  media_free_file(data);
+
+  if (ret == 0) {
+    g_imgview.loaded = 1;
+    g_imgview.zoom_pct = 100;
+    g_imgview.offset_x = 0;
+    g_imgview.offset_y = 0;
+    g_imgview.file_index = index;
+    g_imgview.current_image_index = -1; /* Mark as folder-loaded */
+
+    /* Copy filename */
+    int i = 0;
+    while (g_imgview.file_list[index][i] && i < 255) {
+      g_imgview.current_file[i] = g_imgview.file_list[index][i];
+      i++;
+    }
+    g_imgview.current_file[i] = '\0';
+
+    printk(KERN_INFO "Image Viewer: Loaded %s (%dx%d) [%d/%d]\n",
+           g_imgview.current_file, g_imgview.image.width,
+           g_imgview.image.height, index + 1, g_imgview.file_count);
+  } else {
+    printk(KERN_ERR "Image Viewer: Failed to decode %s\n", full_path);
+    g_imgview.loaded = 0;
   }
 }
 
 static void image_viewer_on_draw(struct window *win) {
-  /* Background */
-  gui_draw_rect(win->x, win->y, win->width, win->height, 0x1A1A1A);
+  int screen_w = primary_display.width;
+  int screen_h = primary_display.height;
 
-  if (!image_viewer_state.loaded) {
-    /* Show "No image loaded" message */
-    const char *msg = "No image loaded";
-    int msg_len = 0;
-    while (msg[msg_len])
-      msg_len++;
+  /* Content area (below titlebar, inside borders) */
+  int content_x = win->x + BORDER_WIDTH;
+  int content_y = win->y + BORDER_WIDTH + TITLEBAR_HEIGHT;
+  int content_w = win->width - 2 * BORDER_WIDTH;
+  int content_h = win->height - 2 * BORDER_WIDTH - TITLEBAR_HEIGHT;
 
-    int text_x = win->x + (win->width - msg_len * 8) / 2;
-    int text_y = win->y + win->height / 2;
-    gui_draw_string(text_x, text_y, msg, THEME_FG, 0x1A1A1A);
+  /* In fullscreen mode, use entire screen */
+  int draw_x = g_imgview.fullscreen ? 0 : content_x;
+  int draw_y = g_imgview.fullscreen ? 0 : content_y;
+  int draw_w = g_imgview.fullscreen ? screen_w : content_w;
+  int draw_h = g_imgview.fullscreen ? screen_h : content_h;
 
-    /* Show instructions */
-    const char *inst = "Click 'Next' to view images";
-    int inst_len = 0;
-    while (inst[inst_len])
-      inst_len++;
+  /* Dark cinematic background */
+  uint32_t bg_color = 0x0D0D0D;
+  for (int y = draw_y; y < draw_y + draw_h; y++) {
+    for (int x = draw_x; x < draw_x + draw_w; x++) {
+      draw_pixel(x, y, bg_color);
+    }
+  }
 
-    int inst_x = win->x + (win->width - inst_len * 8) / 2;
-    int inst_y = text_y + 20;
-    gui_draw_string(inst_x, inst_y, inst, THEME_FG, 0x1A1A1A);
+  if (!g_imgview.loaded) {
+    /* Elegant "No image" message */
+    const char *msg = "Drop an image or click Next";
+    int msg_len = 27;
+    int text_x = draw_x + (draw_w - msg_len * 8) / 2;
+    int text_y = draw_y + draw_h / 2;
+    gui_draw_string(text_x, text_y, msg, 0x6B7280, bg_color);
     return;
   }
 
-  /* Calculate display dimensions using integer math */
-  int img_w =
-      (int)image_viewer_state.image.width * image_viewer_state.zoom_pct / 100;
-  int img_h =
-      (int)image_viewer_state.image.height * image_viewer_state.zoom_pct / 100;
+  /* Calculate display dimensions with rotation */
+  int img_w = (int)g_imgview.image.width;
+  int img_h = (int)g_imgview.image.height;
+  int rot = g_imgview.rotation;
 
-  /* Center image with offset */
-  int draw_x = win->x + (win->width - img_w) / 2 + image_viewer_state.offset_x;
-  int draw_y = win->y + (win->height - img_h) / 2 + image_viewer_state.offset_y;
+  /* Swap dimensions for 90/270 rotation */
+  if (rot == 90 || rot == 270) {
+    int tmp = img_w;
+    img_w = img_h;
+    img_h = tmp;
+  }
 
-  /* Draw image (simple nearest-neighbor scaling) */
-  for (int dy = 0; dy < img_h && dy < win->height; dy++) {
-    for (int dx = 0; dx < img_w && dx < win->width; dx++) {
-      int src_x = dx * 100 / image_viewer_state.zoom_pct;
-      int src_y = dy * 100 / image_viewer_state.zoom_pct;
+  /* Auto-fit image to screen */
+  int toolbar_h = 56;
+  int avail_h = draw_h - toolbar_h - 20;
+  int avail_w = draw_w - 20;
 
-      if (src_x >= 0 && src_x < (int)image_viewer_state.image.width &&
-          src_y >= 0 && src_y < (int)image_viewer_state.image.height) {
+  int zoom = g_imgview.zoom_pct;
+  if (zoom == 0) {
+    /* Auto-fit mode */
+    int zoom_w = (avail_w * 100) / img_w;
+    int zoom_h = (avail_h * 100) / img_h;
+    zoom = (zoom_w < zoom_h) ? zoom_w : zoom_h;
+    if (zoom > 100)
+      zoom = 100; /* Don't upscale */
+  }
 
-        uint32_t pixel =
-            image_viewer_state.image
-                .pixels[src_y * image_viewer_state.image.width + src_x];
+  int scaled_w = img_w * zoom / 100;
+  int scaled_h = img_h * zoom / 100;
 
-        int screen_x = draw_x + dx;
-        int screen_y = draw_y + dy;
+  /* Center image */
+  int img_x = draw_x + (draw_w - scaled_w) / 2 + g_imgview.offset_x;
+  int img_y = draw_y + (avail_h - scaled_h) / 2 + 10 + g_imgview.offset_y;
 
-        if (screen_x >= win->x && screen_x < win->x + win->width &&
-            screen_y >= win->y && screen_y < win->y + win->height) {
-          draw_pixel(screen_x, screen_y, pixel);
-        }
+  /* Draw image with rotation */
+  int orig_w = (int)g_imgview.image.width;
+  int orig_h = (int)g_imgview.image.height;
+
+  for (int dy = 0; dy < scaled_h; dy++) {
+    int screen_y = img_y + dy;
+    if (screen_y < draw_y || screen_y >= draw_y + avail_h + 10)
+      continue;
+
+    for (int dx = 0; dx < scaled_w; dx++) {
+      int screen_x = img_x + dx;
+      if (screen_x < draw_x || screen_x >= draw_x + draw_w)
+        continue;
+
+      /* Unscale to get image coordinates */
+      int ix = dx * 100 / zoom;
+      int iy = dy * 100 / zoom;
+
+      /* Apply rotation transform */
+      int src_x, src_y;
+      switch (rot) {
+      case 90:
+        src_x = iy;
+        src_y = orig_h - 1 - ix;
+        break;
+      case 180:
+        src_x = orig_w - 1 - ix;
+        src_y = orig_h - 1 - iy;
+        break;
+      case 270:
+        src_x = orig_w - 1 - iy;
+        src_y = ix;
+        break;
+      default: /* 0 */
+        src_x = ix;
+        src_y = iy;
+        break;
+      }
+
+      if (src_x >= 0 && src_x < orig_w && src_y >= 0 && src_y < orig_h) {
+        uint32_t pixel = g_imgview.image.pixels[src_y * orig_w + src_x];
+        draw_pixel(screen_x, screen_y, pixel);
       }
     }
   }
 
-  /* Draw toolbar at bottom */
-  int toolbar_h = 40;
-  int toolbar_y = win->y + win->height - toolbar_h;
-  gui_draw_rect(win->x, toolbar_y, win->width, toolbar_h, 0x2A2A2A);
+  /* ============================================= */
+  /* MODERN FLOATING TOOLBAR                      */
+  /* ============================================= */
 
-  /* Buttons */
-  int btn_w = 80;
-  int btn_h = 30;
-  int btn_y = toolbar_y + 5;
-  int btn_spacing = 10;
-  int btn_x = win->x + 10;
+  int tb_w = 520;
+  int tb_h = 48;
+  int tb_x = draw_x + (draw_w - tb_w) / 2;
+  int tb_y = draw_y + draw_h - tb_h - 16;
 
-  /* Previous button */
-  uint32_t prev_color = (mouse_x >= btn_x && mouse_x < btn_x + btn_w &&
-                         mouse_y >= btn_y && mouse_y < btn_y + btn_h)
-                            ? THEME_BUTTON_HOVER
-                            : THEME_BUTTON;
-  gui_draw_rect(btn_x, btn_y, btn_w, btn_h, prev_color);
-  gui_draw_string(btn_x + 15, btn_y + 11, "< Prev", THEME_FG, prev_color);
-
-  btn_x += btn_w + btn_spacing;
-
-  /* Next button */
-  uint32_t next_color = (mouse_x >= btn_x && mouse_x < btn_x + btn_w &&
-                         mouse_y >= btn_y && mouse_y < btn_y + btn_h)
-                            ? THEME_BUTTON_HOVER
-                            : THEME_BUTTON;
-  gui_draw_rect(btn_x, btn_y, btn_w, btn_h, next_color);
-  gui_draw_string(btn_x + 15, btn_y + 11, "Next >", THEME_FG, next_color);
-
-  btn_x += btn_w + btn_spacing;
-
-  /* Zoom In button */
-  uint32_t zoomin_color = (mouse_x >= btn_x && mouse_x < btn_x + btn_w &&
-                           mouse_y >= btn_y && mouse_y < btn_y + btn_h)
-                              ? THEME_BUTTON_HOVER
-                              : THEME_BUTTON;
-  gui_draw_rect(btn_x, btn_y, btn_w, btn_h, zoomin_color);
-  gui_draw_string(btn_x + 20, btn_y + 11, "Zoom+", THEME_FG, zoomin_color);
-
-  btn_x += btn_w + btn_spacing;
-
-  /* Zoom Out button */
-  uint32_t zoomout_color = (mouse_x >= btn_x && mouse_x < btn_x + btn_w &&
-                            mouse_y >= btn_y && mouse_y < btn_y + btn_h)
-                               ? THEME_BUTTON_HOVER
-                               : THEME_BUTTON;
-  gui_draw_rect(btn_x, btn_y, btn_w, btn_h, zoomout_color);
-  gui_draw_string(btn_x + 20, btn_y + 11, "Zoom-", THEME_FG, zoomout_color);
-
-  btn_x += btn_w + btn_spacing;
-
-  /* Fit button */
-  uint32_t fit_color = (mouse_x >= btn_x && mouse_x < btn_x + btn_w &&
-                        mouse_y >= btn_y && mouse_y < btn_y + btn_h)
-                           ? THEME_BUTTON_HOVER
-                           : THEME_BUTTON;
-  gui_draw_rect(btn_x, btn_y, btn_w, btn_h, fit_color);
-  gui_draw_string(btn_x + 25, btn_y + 11, "Fit", THEME_FG, fit_color);
-
-  /* Show filename and zoom level */
-  char info[128];
-  int info_idx = 0;
-
-  /* Copy filename */
-  int i = 0;
-  while (image_viewer_state.current_file[i] && info_idx < 100) {
-    info[info_idx++] = image_viewer_state.current_file[i++];
+  /* Glassmorphism toolbar background */
+  for (int y = tb_y; y < tb_y + tb_h; y++) {
+    for (int x = tb_x; x < tb_x + tb_w; x++) {
+      /* Semi-transparent dark with blur effect simulation */
+      int dist_y = (y - tb_y < tb_h / 2) ? (y - tb_y) : (tb_y + tb_h - y);
+      int alpha = 200 + (dist_y * 30 / (tb_h / 2));
+      if (alpha > 230)
+        alpha = 230;
+      uint32_t bg = ((alpha / 10) << 16) | ((alpha / 10) << 8) | (alpha / 8);
+      draw_pixel(x, y, bg);
+    }
   }
 
-  /* Add zoom info */
-  info[info_idx++] = ' ';
-  info[info_idx++] = '-';
-  info[info_idx++] = ' ';
-
-  int z = image_viewer_state.zoom_pct;
-  if (z >= 100) {
-    if (z >= 1000)
-      info[info_idx++] = '0' + (z / 1000);
-    if (z >= 100)
-      info[info_idx++] = '0' + ((z / 100) % 10);
+  /* Rounded corners (top) */
+  int corner_r = 12;
+  for (int cy = 0; cy < corner_r; cy++) {
+    for (int cx = 0; cx < corner_r; cx++) {
+      int dx = corner_r - cx;
+      int dy = corner_r - cy;
+      if (dx * dx + dy * dy > corner_r * corner_r) {
+        draw_pixel(tb_x + cx, tb_y + cy, bg_color);
+        draw_pixel(tb_x + tb_w - 1 - cx, tb_y + cy, bg_color);
+      }
+    }
   }
-  info[info_idx++] = '0' + ((z / 10) % 10);
-  info[info_idx++] = '0' + (z % 10);
-  info[info_idx++] = '%';
-  info[info_idx] = '\0';
 
-  gui_draw_string(win->x + win->width - 200, btn_y + 11, info, THEME_FG,
-                  0x2A2A2A);
+  /* Toolbar buttons */
+  int btn_size = 36;
+  int btn_spacing = 8;
+  int btn_y = tb_y + (tb_h - btn_size) / 2;
+  int btn_x = tb_x + 16;
+
+  /* Button icons (using ASCII for now) */
+  const char *icons[] = {"<", ">", "R", "L", "+", "-", "F", "X"};
+  const char *labels[] = {"Prev",  "Next",  "Rot R", "Rot L",
+                          "Zoom+", "Zoom-", "Fit",   "Full"};
+  uint32_t btn_bg = 0x374151;
+  uint32_t btn_hover = 0x4B5563;
+  uint32_t icon_color = 0xE5E7EB;
+
+  for (int i = 0; i < 8; i++) {
+    /* Check hover */
+    int is_hover = (mouse_x >= btn_x && mouse_x < btn_x + btn_size &&
+                    mouse_y >= btn_y && mouse_y < btn_y + btn_size);
+    uint32_t bg = is_hover ? btn_hover : btn_bg;
+
+    /* Draw rounded button */
+    int r = 8;
+    for (int y = 0; y < btn_size; y++) {
+      for (int x = 0; x < btn_size; x++) {
+        int in_corner = 0;
+        if (x < r && y < r && (r - x) * (r - x) + (r - y) * (r - y) > r * r)
+          in_corner = 1;
+        if (x >= btn_size - r && y < r &&
+            (x - btn_size + r + 1) * (x - btn_size + r + 1) +
+                    (r - y) * (r - y) >
+                r * r)
+          in_corner = 1;
+        if (x < r && y >= btn_size - r &&
+            (r - x) * (r - x) +
+                    (y - btn_size + r + 1) * (y - btn_size + r + 1) >
+                r * r)
+          in_corner = 1;
+        if (x >= btn_size - r && y >= btn_size - r &&
+            (x - btn_size + r + 1) * (x - btn_size + r + 1) +
+                    (y - btn_size + r + 1) * (y - btn_size + r + 1) >
+                r * r)
+          in_corner = 1;
+        if (!in_corner) {
+          draw_pixel(btn_x + x, btn_y + y, bg);
+        }
+      }
+    }
+    /* Draw pre-rendered RGBA icon from toolbar_icons.h */
+    const uint32_t *icon_data = toolbar_icons[i];
+    int icon_x = btn_x + (btn_size - TOOLBAR_ICON_SIZE) / 2;
+    int icon_y = btn_y + (btn_size - TOOLBAR_ICON_SIZE) / 2;
+
+    for (int iy = 0; iy < TOOLBAR_ICON_SIZE; iy++) {
+      for (int ix = 0; ix < TOOLBAR_ICON_SIZE; ix++) {
+        uint32_t pixel = icon_data[iy * TOOLBAR_ICON_SIZE + ix];
+        uint8_t alpha = (pixel >> 24) & 0xFF;
+        if (alpha > 0) {
+          /* Simple alpha blending: if alpha > 128, draw white */
+          if (alpha > 128) {
+            draw_pixel(icon_x + ix, icon_y + iy, icon_color);
+          }
+        }
+      }
+    }
+    btn_x += btn_size + btn_spacing;
+  }
+
+  /* Image info text */
+  char info[64];
+  int idx = 0;
+  /* Dimensions */
+  int w = (int)g_imgview.image.width;
+  int h = (int)g_imgview.image.height;
+  if (w >= 1000) {
+    info[idx++] = '0' + (w / 1000) % 10;
+  }
+  if (w >= 100) {
+    info[idx++] = '0' + (w / 100) % 10;
+  }
+  if (w >= 10) {
+    info[idx++] = '0' + (w / 10) % 10;
+  }
+  info[idx++] = '0' + w % 10;
+  info[idx++] = 'x';
+  if (h >= 1000) {
+    info[idx++] = '0' + (h / 1000) % 10;
+  }
+  if (h >= 100) {
+    info[idx++] = '0' + (h / 100) % 10;
+  }
+  if (h >= 10) {
+    info[idx++] = '0' + (h / 10) % 10;
+  }
+  info[idx++] = '0' + h % 10;
+  info[idx++] = ' ';
+  /* Rotation */
+  if (rot > 0) {
+    if (rot >= 100)
+      info[idx++] = '0' + (rot / 100) % 10;
+    if (rot >= 10)
+      info[idx++] = '0' + (rot / 10) % 10;
+    info[idx++] = '0' + rot % 10;
+    info[idx++] = 176; /* degree symbol approximation */
+  }
+  info[idx] = '\0';
+
+  gui_draw_string(tb_x + tb_w - 120, btn_y + 12, info, 0x9CA3AF, 0x1F2937);
 }
 
 static void image_viewer_on_mouse(struct window *win, int x, int y,
                                   int buttons) {
-  int toolbar_h = 40;
-  int toolbar_y = win->y + win->height - toolbar_h;
+  /* x,y are already window-relative (0,0 = window top-left) */
 
-  /* Check toolbar buttons */
-  if (y >= toolbar_y) {
-    int btn_w = 80;
-    int btn_h = 30;
-    int btn_y = toolbar_y + 5;
-    int btn_spacing = 10;
-    int btn_x = win->x + 10;
+  /* Content area within window (relative coords) */
+  int content_x = BORDER_WIDTH;
+  int content_y = BORDER_WIDTH + TITLEBAR_HEIGHT;
+  int content_w = win->width - 2 * BORDER_WIDTH;
+  int content_h = win->height - 2 * BORDER_WIDTH - TITLEBAR_HEIGHT;
 
-    /* Previous button */
-    if (x >= btn_x && x < btn_x + btn_w && y >= btn_y && y < btn_y + btn_h) {
-      if (image_viewer_state.current_image_index > 0) {
-        image_viewer_load_bootstrap(image_viewer_state.current_image_index - 1);
+  /* Toolbar position within content area */
+  int tb_w = 520;
+  int tb_h = 48;
+  int tb_x = content_x + (content_w - tb_w) / 2;
+  int tb_y = content_y + content_h - tb_h - 16;
+
+  int btn_size = 36;
+  int btn_spacing = 8;
+  int btn_y_pos = tb_y + (tb_h - btn_size) / 2;
+  int btn_x = tb_x + 16;
+
+  /* Check each of the 8 toolbar buttons */
+  for (int i = 0; i < 8; i++) {
+    if (x >= btn_x && x < btn_x + btn_size && y >= btn_y_pos &&
+        y < btn_y_pos + btn_size) {
+
+      switch (i) {
+      case 0: /* Previous */
+        if (g_imgview.file_count > 0) {
+          /* Folder-based navigation */
+          int new_index = g_imgview.file_index - 1;
+          if (new_index < 0)
+            new_index = g_imgview.file_count - 1;
+          image_viewer_load_from_folder(new_index);
+        } else {
+          /* Fallback to bootstrap images */
+          if (g_imgview.current_image_index <= 0) {
+            image_viewer_load_bootstrap(NUM_BOOTSTRAP_IMAGES - 1);
+          } else {
+            image_viewer_load_bootstrap(g_imgview.current_image_index - 1);
+          }
+        }
+        break;
+
+      case 1: /* Next */
+        if (g_imgview.file_count > 0) {
+          /* Folder-based navigation */
+          int new_index = g_imgview.file_index + 1;
+          if (new_index >= g_imgview.file_count)
+            new_index = 0;
+          image_viewer_load_from_folder(new_index);
+        } else {
+          /* Fallback to bootstrap images */
+          if (g_imgview.current_image_index < 0 ||
+              g_imgview.current_image_index >= NUM_BOOTSTRAP_IMAGES - 1) {
+            image_viewer_load_bootstrap(0);
+          } else {
+            image_viewer_load_bootstrap(g_imgview.current_image_index + 1);
+          }
+        }
+        break;
+
+      case 2: /* Rotate Right (CW) */
+        g_imgview.rotation = (g_imgview.rotation + 90) % 360;
+        break;
+
+      case 3: /* Rotate Left (CCW) */
+        g_imgview.rotation = (g_imgview.rotation + 270) % 360;
+        break;
+
+      case 4: /* Zoom In */
+        if (g_imgview.zoom_pct == 0) {
+          g_imgview.zoom_pct = 100;
+        }
+        g_imgview.zoom_pct = g_imgview.zoom_pct * 125 / 100;
+        if (g_imgview.zoom_pct > 400) {
+          g_imgview.zoom_pct = 400;
+        }
+        break;
+
+      case 5: /* Zoom Out */
+        if (g_imgview.zoom_pct == 0) {
+          g_imgview.zoom_pct = 100;
+        }
+        g_imgview.zoom_pct = g_imgview.zoom_pct * 80 / 100;
+        if (g_imgview.zoom_pct < 10) {
+          g_imgview.zoom_pct = 10;
+        }
+        break;
+
+      case 6:                   /* Fit */
+        g_imgview.zoom_pct = 0; /* Auto-fit mode */
+        g_imgview.offset_x = 0;
+        g_imgview.offset_y = 0;
+        break;
+
+      case 7: /* Fullscreen Toggle */
+        g_imgview.fullscreen = !g_imgview.fullscreen;
+        g_imgview.zoom_pct = 0; /* Reset to auto-fit */
+        g_imgview.offset_x = 0;
+        g_imgview.offset_y = 0;
+        break;
       }
       return;
     }
-    btn_x += btn_w + btn_spacing;
-
-    /* Next button */
-    if (x >= btn_x && x < btn_x + btn_w && y >= btn_y && y < btn_y + btn_h) {
-      if (image_viewer_state.current_image_index < NUM_BOOTSTRAP_IMAGES - 1) {
-        image_viewer_load_bootstrap(image_viewer_state.current_image_index + 1);
-      } else {
-        image_viewer_load_bootstrap(0); /* Loop back */
-      }
-      return;
-    }
-    btn_x += btn_w + btn_spacing;
-
-    /* Zoom In button - increase by 25% each click */
-    if (x >= btn_x && x < btn_x + btn_w && y >= btn_y && y < btn_y + btn_h) {
-      image_viewer_state.zoom_pct = image_viewer_state.zoom_pct * 125 / 100;
-      if (image_viewer_state.zoom_pct > 500)
-        image_viewer_state.zoom_pct = 500;
-      return;
-    }
-    btn_x += btn_w + btn_spacing;
-
-    /* Zoom Out button - decrease by 20% each click */
-    if (x >= btn_x && x < btn_x + btn_w && y >= btn_y && y < btn_y + btn_h) {
-      image_viewer_state.zoom_pct = image_viewer_state.zoom_pct * 100 / 125;
-      if (image_viewer_state.zoom_pct < 10)
-        image_viewer_state.zoom_pct = 10;
-      return;
-    }
-    btn_x += btn_w + btn_spacing;
-
-    /* Fit button */
-    if (x >= btn_x && x < btn_x + btn_w && y >= btn_y && y < btn_y + btn_h) {
-      if (image_viewer_state.loaded) {
-        int zoom_w =
-            (win->width - 20) * 100 / (int)image_viewer_state.image.width;
-        int zoom_h = (win->height - toolbar_h - 20) * 100 /
-                     (int)image_viewer_state.image.height;
-        image_viewer_state.zoom_pct = (zoom_w < zoom_h) ? zoom_w : zoom_h;
-        image_viewer_state.offset_x = 0;
-        image_viewer_state.offset_y = 0;
-      }
-      return;
-    }
+    btn_x += btn_size + btn_spacing;
   }
 
-  /* Pan image with drag */
-  if (buttons & 1) { /* Left button */
-    if (!image_viewer_state.dragging) {
-      image_viewer_state.dragging = 1;
-      image_viewer_state.drag_start_x = x;
-      image_viewer_state.drag_start_y = y;
-    } else {
-      int dx = x - image_viewer_state.drag_start_x;
-      int dy = y - image_viewer_state.drag_start_y;
-      image_viewer_state.offset_x += dx;
-      image_viewer_state.offset_y += dy;
-      image_viewer_state.drag_start_x = x;
-      image_viewer_state.drag_start_y = y;
-    }
-  } else {
-    image_viewer_state.dragging = 0;
-  }
+  /* Pan disabled - image stays fixed */
+  (void)buttons; /* Unused */
 }
 
 void gui_open_image_gallery(void) {
@@ -4450,7 +4827,7 @@ void gui_open_image_gallery(void) {
     win->on_mouse = image_viewer_on_mouse;
 
     /* Load first image */
-    if (!image_viewer_state.loaded) {
+    if (!g_imgview.loaded) {
       image_viewer_load_bootstrap(0);
     }
   }

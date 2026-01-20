@@ -12,6 +12,8 @@
 #include "../include/loader/elf.h"
 #include "../include/mm/kmalloc.h"
 #include "../include/printk.h"
+#include "../include/sync/spinlock.h"
+#include "../include/mm/aslr.h"
 
 /* Forward declare strncpy and strlen from our kernel */
 extern char *strncpy(char *dst, const char *src, size_t n);
@@ -36,6 +38,9 @@ extern kapi_t *kapi_get(void);
 static process_t proc_table[MAX_PROCESSES];
 static int current_pid = -1; // -1 means kernel/shell is running
 static int next_pid = 1;
+
+// Spinlock protecting process table access
+static DEFINE_SPINLOCK(proc_table_lock);
 
 // Current process pointer - used by IRQ handler for preemption
 // NULL means kernel is running (no process to save to)
@@ -84,8 +89,8 @@ void process_init(void) {
   printf("[PROC] kernel_context at: 0x%lx\n", (uint64_t)&kernel_context);
 }
 
-// Find a free slot in the process table
-static int find_free_slot(void) {
+// Find a free slot in the process table (caller must hold proc_table_lock)
+static int find_free_slot_unlocked(void) {
   for (int i = 0; i < MAX_PROCESSES; i++) {
     if (proc_table[i].state == PROC_STATE_FREE) {
       return i;
@@ -101,11 +106,14 @@ process_t *process_current(void) {
 }
 
 process_t *process_get(int pid) {
+  uint64_t flags = spin_lock_irqsave(&proc_table_lock);
   for (int i = 0; i < MAX_PROCESSES; i++) {
     if (proc_table[i].pid == pid && proc_table[i].state != PROC_STATE_FREE) {
+      spin_unlock_irqrestore(&proc_table_lock, flags);
       return &proc_table[i];
     }
   }
+  spin_unlock_irqrestore(&proc_table_lock, flags);
   return NULL;
 }
 
@@ -113,6 +121,7 @@ process_t *process_get(int pid) {
 process_t **process_get_current_ptr(void) { return &current_process; }
 
 int process_count_ready(void) {
+  uint64_t flags = spin_lock_irqsave(&proc_table_lock);
   int count = 0;
   for (int i = 0; i < MAX_PROCESSES; i++) {
     if (proc_table[i].state == PROC_STATE_READY ||
@@ -120,6 +129,7 @@ int process_count_ready(void) {
       count++;
     }
   }
+  spin_unlock_irqrestore(&proc_table_lock, flags);
   return count;
 }
 
@@ -152,12 +162,18 @@ int process_create(const char *path, int argc, char **argv) {
   (void)argc;
   (void)argv;
 
-  // Find free slot
-  int slot = find_free_slot();
+  // Find free slot (with locking)
+  uint64_t flags = spin_lock_irqsave(&proc_table_lock);
+  int slot = find_free_slot_unlocked();
   if (slot < 0) {
+    spin_unlock_irqrestore(&proc_table_lock, flags);
     printf("[PROC] No free process slots\n");
     return -1;
   }
+  // Reserve the slot immediately
+  proc_table[slot].state = PROC_STATE_READY;
+  proc_table[slot].pid = next_pid++;
+  spin_unlock_irqrestore(&proc_table_lock, flags);
 
   // Look up file
   vfs_node_t *file = vfs_lookup(path);
@@ -203,8 +219,9 @@ int process_create(const char *path, int argc, char **argv) {
     return -1;
   }
 
-  // Align load address
-  uint64_t load_addr = ALIGN_64K(next_load_addr);
+  // Align load address with ASLR randomization
+  uint64_t aslr_offset = aslr_exec_offset();
+  uint64_t load_addr = ALIGN_64K(next_load_addr + aslr_offset);
 
   // Load the ELF at this address
   elf_load_info_t info;

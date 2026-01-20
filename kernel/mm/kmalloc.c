@@ -14,10 +14,10 @@
 /* ===================================================================== */
 
 #define HEAP_SIZE                                                              \
-  (64 * 1024 * 1024) /* 64MB kernel heap - wallpapers need 4MB each */
-#define MIN_ALLOC 32 /* Minimum allocation size */
+  (128 * 1024 * 1024) /* 128MB kernel heap - 4K wallpapers need space */
+#define MIN_ALLOC 32  /* Minimum allocation size */
 #define MAX_ALLOC                                                              \
-  (16 * 1024 * 1024) /* Maximum single allocation (16MB for DOOM zone) */
+  (32 * 1024 * 1024) /* Maximum single allocation (32MB for large images) */
 
 /* Fixed heap location - after kernel at 0x42000000 */
 /* Kernel loads at 0x40200000, so 0x42000000 gives 30MB for kernel code/data */

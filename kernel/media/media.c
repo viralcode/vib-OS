@@ -7,6 +7,7 @@
 #include "mm/kmalloc.h"
 #include "printk.h"
 #include "types.h"
+#include "sandbox/sandbox.h"
 
 /* --------------------------------------------------------------------- */
 /* File loading                                                          */
@@ -109,8 +110,8 @@ int media_decode_jpeg_buffer(const uint8_t *data, size_t size,
 
   size_t pixel_count = (size_t)info.m_width * (size_t)info.m_height;
 
-  /* Prevent excessively large allocations (16MB max image) */
-  if (pixel_count > 4 * 1024 * 1024) {
+  /* Prevent excessively large allocations (64MB max image - 4K support) */
+  if (pixel_count > 16 * 1024 * 1024) {
     printk(KERN_ERR "JPEG: image too large (%zu pixels)\n", pixel_count);
     return -EINVAL;
   }
@@ -246,4 +247,56 @@ void media_free_audio(media_audio_t *audio) {
   audio->sample_count = 0;
   audio->sample_rate = 0;
   audio->channels = 0;
+}
+
+/* --------------------------------------------------------------------- */
+/* PNG decoding (tPNG)                                                    */
+/* --------------------------------------------------------------------- */
+
+#include "tpng.h"
+
+int media_decode_png(const uint8_t *data, size_t size, media_image_t *out) {
+  if (!data || !size || !out)
+    return -EINVAL;
+
+  uint32_t width = 0, height = 0;
+  uint8_t *rgba = tpng_decode(data, (uint32_t)size, &width, &height);
+
+  if (!rgba || width == 0 || height == 0) {
+    printk(KERN_ERR "PNG: decode failed\n");
+    if (rgba)
+      kfree(rgba);
+    return -EINVAL;
+  }
+
+  /* Check for excessively large images (16M pixels max, same as JPEG) */
+  size_t pixel_count = (size_t)width * (size_t)height;
+  if (pixel_count > 16 * 1024 * 1024) {
+    printk(KERN_ERR "PNG: image too large (%zu pixels)\n", pixel_count);
+    kfree(rgba);
+    return -EINVAL;
+  }
+
+  /* Convert RGBA (uint8_t*) to 0x00RRGGBB (uint32_t*) format */
+  uint32_t *pixels =
+      (uint32_t *)kmalloc(pixel_count * sizeof(uint32_t), GFP_KERNEL);
+  if (!pixels) {
+    kfree(rgba);
+    return -ENOMEM;
+  }
+
+  for (size_t i = 0; i < pixel_count; i++) {
+    uint8_t r = rgba[i * 4 + 0];
+    uint8_t g = rgba[i * 4 + 1];
+    uint8_t b = rgba[i * 4 + 2];
+    /* Alpha is in rgba[i * 4 + 3] but we ignore it for now */
+    pixels[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+  }
+
+  kfree(rgba);
+
+  out->width = width;
+  out->height = height;
+  out->pixels = pixels;
+  return 0;
 }
