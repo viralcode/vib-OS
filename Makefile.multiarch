@@ -123,6 +123,8 @@ KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/gui -name '*.c' 2>/dev/null)
 KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/media -name '*.c' 2>/dev/null)
 KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/apps -name '*.c' 2>/dev/null)
 KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/drivers -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/sync -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/sandbox -name '*.c' 2>/dev/null)
 
 # Architecture-specific sources
 KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/arch/$(ARCH) -name '*.c' 2>/dev/null)
@@ -201,6 +203,8 @@ $(BUILD_DIR):
 	@mkdir -p $(BUILD_DIR)/kernel/media
 	@mkdir -p $(BUILD_DIR)/kernel/apps
 	@mkdir -p $(BUILD_DIR)/kernel/drivers
+	@mkdir -p $(BUILD_DIR)/kernel/sync
+	@mkdir -p $(BUILD_DIR)/kernel/sandbox
 	@mkdir -p $(BUILD_DIR)/drivers
 	@mkdir -p $(IMAGE_DIR)
 
