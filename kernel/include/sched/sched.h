@@ -183,6 +183,33 @@ int wake_up_process(struct task_struct *task);
 struct task_struct *create_task(void (*entry)(void *), void *arg, uint32_t flags);
 
 /**
+ * create_thread - Create a new thread (shares memory with parent)
+ * @entry: Entry point function
+ * @arg: Argument to pass to entry
+ * @stack: User stack pointer (top of stack)
+ * @clone_flags: Clone flags (CLONE_VM, CLONE_THREAD, etc.)
+ * 
+ * Return: TID of new thread, or negative on failure
+ */
+pid_t create_thread(void (*entry)(void *), void *arg, void *stack, uint32_t clone_flags);
+
+/**
+ * get_task_by_pid - Find a task by PID/TID
+ * @pid: Process/Thread ID
+ * 
+ * Return: Task pointer or NULL if not found
+ */
+struct task_struct *get_task_by_pid(pid_t pid);
+
+/**
+ * sched_kill_task - Send termination signal to a task (scheduler API)
+ * @pid: Task ID to kill
+ * 
+ * Return: 0 on success, negative on error
+ */
+int sched_kill_task(pid_t pid);
+
+/**
  * exit_task - Terminate current task
  * @code: Exit code
  */

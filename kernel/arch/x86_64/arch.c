@@ -226,6 +226,88 @@ uint32_t arch_cpu_count(void)
     return 1;
 }
 
+/* ===================================================================== */
+/* SMP (Symmetric Multi-Processing) */
+/* ===================================================================== */
+
+void smp_init(void)
+{
+    printk(KERN_INFO "SMP: Initializing multiprocessor support (x86_64)\n");
+    printk(KERN_INFO "SMP: Boot CPU (CPU 0) initialized\n");
+}
+
+/* ===================================================================== */
+/* Userspace Entry */
+/* ===================================================================== */
+
+/**
+ * arch_enter_userspace - Jump to userspace execution (Ring 3)
+ * @entry: Entry point address in userspace
+ * @sp: User stack pointer
+ * @argc: Argument count (passed in rdi)
+ * @argv: Argument vector pointer (passed in rsi)
+ *
+ * This function uses IRETQ to jump to Ring 3 userspace. It does not return.
+ */
+void arch_enter_userspace(uint64_t entry, uint64_t sp, uint64_t argc, uint64_t argv)
+{
+    printk(KERN_INFO "x86_64: Entering userspace at 0x%llx, sp=0x%llx\n",
+           (unsigned long long)entry, (unsigned long long)sp);
+    
+    /*
+     * IRETQ expects on stack (from bottom to top):
+     *   SS     - User stack segment (0x23 = Ring 3 data)
+     *   RSP    - User stack pointer
+     *   RFLAGS - Flags (IF=1 for interrupts)
+     *   CS     - User code segment (0x1B = Ring 3 code)
+     *   RIP    - Entry point
+     */
+    
+    /* Use separate asm blocks to avoid register pressure */
+    
+    /* First, set argc and argv in registers that won't be clobbered */
+    register uint64_t r_argc asm("rdi") = argc;
+    register uint64_t r_argv asm("rsi") = argv;
+    
+    /* Suppress unused warnings */
+    (void)r_argc;
+    (void)r_argv;
+    
+    asm volatile(
+        /* Build IRETQ frame on stack */
+        "pushq $0x23\n"      /* SS - Ring 3 data segment */
+        "pushq %0\n"         /* RSP - user stack */
+        "pushq $0x202\n"     /* RFLAGS - IF=1 */
+        "pushq $0x1B\n"      /* CS - Ring 3 code segment */
+        "pushq %1\n"         /* RIP - entry point */
+        
+        /* Clear other registers for security */
+        "xor %%rax, %%rax\n"
+        "xor %%rbx, %%rbx\n"
+        "xor %%rcx, %%rcx\n"
+        "xor %%rdx, %%rdx\n"
+        "xor %%rbp, %%rbp\n"
+        "xor %%r8, %%r8\n"
+        "xor %%r9, %%r9\n"
+        "xor %%r10, %%r10\n"
+        "xor %%r11, %%r11\n"
+        "xor %%r12, %%r12\n"
+        "xor %%r13, %%r13\n"
+        "xor %%r14, %%r14\n"
+        "xor %%r15, %%r15\n"
+        
+        /* Jump to userspace */
+        "iretq\n"
+        :
+        : "r" (sp), "r" (entry)
+        : "memory", "rax", "rbx", "rcx", "rdx", "rbp",
+          "r8", "r9", "r10", "r11", "r12", "r13", "r14", "r15"
+    );
+    
+    /* Should never reach here */
+    __builtin_unreachable();
+}
+
 void arch_cpu_info(char *buf, size_t size)
 {
     /* Use CPUID to get CPU info */

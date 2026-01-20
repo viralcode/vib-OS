@@ -82,6 +82,7 @@ graph TD
     subgraph Userspace ["Userspace (EL0/Ring 3)"]
         GUI[Window Manager & GUI Apps]
         Shell[Terminal / Shell]
+        ProcMgr[Process Manager]
         Doom[Doom Engine]
         Python[Python Interpreter]
         Nano[Nano Language]
@@ -92,9 +93,10 @@ graph TD
         
         subgraph Subsystems
             VFS[Virtual File System]
-            Process[Process Scheduler]
+            Process["Process Scheduler + Threading"]
             Net[TCP/IP Networking Stack]
             Mem["Memory Manager (PMM/VMM)"]
+            SMP["SMP (Multi-CPU)"]
         end
         
         subgraph Security
@@ -115,6 +117,7 @@ graph TD
 
     GUI --> Syscall
     Shell --> Syscall
+    ProcMgr --> Syscall
     Doom --> Syscall
     Python --> Syscall
     Nano --> Syscall
@@ -126,6 +129,7 @@ graph TD
     VFS --> RamFS
     Net --> VirtioNet
     Process --> Mem
+    Process --> SMP
     
     Security --> Mem
     Drivers --> Hardware
@@ -145,7 +149,13 @@ graph TD
 ### 📂 File System (VFS)
 - **Virtual File System**: Unified interface for different filesystems
 - **RamFS**: In-memory filesystem for temporary storage
-- **EXT4 Support**: Read support for EXT4 filesystems (experimental)
+- **EXT4 Read/Write Support**: Full implementation including:
+  - Block bitmap management (alloc/free)
+  - Inode bitmap management (alloc/free)
+  - Directory entry creation
+  - File creation and writing
+  - Indirect block support (single/double)
+  - Superblock sync
 - **APFS Support**: Read support for Apple File System (experimental)
 - **Interactive File Manager**:
   - Grid view for files and folders
@@ -189,6 +199,13 @@ graph TD
 ### 🛠 Core System
 - **Multi-Architecture Kernel**: Supports ARM64 and x86_64 with clean abstraction layer
 - **Preemptive Multitasking**: Priority-based scheduler with context switching
+- **Process Manager**: GUI app showing all running processes with kill functionality
+- **Multi-threading**: Full thread support via `clone()` syscall with `CLONE_VM` for shared memory
+- **Userspace Execution**: Complete `sys_execve` implementation:
+  - ELF loading with validation
+  - User stack setup (argc/argv/envp)
+  - Jump to userspace via `eret` (ARM64) or `iretq` (x86_64)
+- **SMP Support**: Symmetric Multi-Processing infrastructure (boots on CPU 0, secondary CPU support ready)
 - **Memory Management**: 4-level paging (ARM64) and 4-level paging (x86_64)
 - **Virtual Memory**: Full MMU support with demand paging
 - **Interrupt Handling**: 
@@ -222,6 +239,7 @@ graph TD
 - **Notepad**: Text editor with save/load functionality backed by VFS
 - **Image Viewer**: JPEG image viewer with zoom, rotate, and pan support
 - **Audio Player**: MP3 playback support via minimp3 decoder
+- **Process Manager**: View running processes (PID, name, state) with kill button
 - **Snake**: Classic game with graphics and score tracking
 - **Calculator**: Basic arithmetic operations with GUI
 - **File Manager**: Browse, create, rename, and delete files (click images/audio to open)
@@ -382,26 +400,31 @@ Use UTM (https://mac.getutm.app/):
 - ✅ x86_64 kernel builds successfully
 - ✅ GUI system with windows, dock, and applications
 - ✅ File system (RamFS) with file manager
+- ✅ **EXT4 Read/Write Support** - Full implementation with block/inode allocation
 - ✅ Networking (TCP/IP stack, virtio-net)
-- ✅ Process management and scheduling
+- ✅ Process management with GUI process manager
+- ✅ Multi-threading via clone() syscall
+- ✅ SMP infrastructure initialized
+- ✅ **Complete sys_execve** - Loads ELF, sets up user stack, jumps to userspace
 - ✅ Input (keyboard and mouse)
 - ✅ Doom runs with full graphics
 - ✅ Python and Nano language interpreters
 - ✅ Security features (spinlocks, sandbox, ASLR)
 
 ### Known Issues
-1. **Sound Support**: Intel HDA driver initializes but audio playback is unstable
-2. **Persistent Storage**: Currently RAM-only (RamFS) - data lost on reboot
-3. **x86_64 Testing**: Needs more real hardware testing
-4. **Network Settings UI**: Not fully implemented
-5. **Web Browser**: Basic rendering only, no full HTML parser
+1. **Sound Support**: Intel HDA driver works but audio may be choppy in QEMU
+2. **x86_64 Testing**: Needs more real hardware testing
+3. **Network Settings UI**: Not fully implemented
+4. **Web Browser**: Basic rendering only, no full HTML parser
 
 ### Roadmap
-- [ ] **Persistent Storage**: Implement EXT4/FAT32 write support
+- [x] ~~**Multi-core**: SMP support for multiple CPUs~~ *(Infrastructure complete)*
+- [x] ~~**Process Manager**: View and kill running processes~~ *(Done)*
+- [x] ~~**Multi-threading**: Thread creation via clone()~~ *(Done)*
+- [x] ~~**EXT4 Write Support**: Full read/write with bitmap management~~ *(Done)*
+- [x] ~~**Userspace Execution**: Complete sys_execve implementation~~ *(Done)*
 - [ ] **x86 32-bit**: Complete kernel implementation
-- [ ] **Audio**: Stabilize Intel HDA buffer management
 - [ ] **USB Support**: Add USB mass storage and HID drivers
-- [ ] **Multi-core**: SMP support for multiple CPUs
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
 - [ ] **PNG Support**: Add PNG image decoder
