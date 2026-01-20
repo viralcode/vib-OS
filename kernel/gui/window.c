@@ -739,6 +739,13 @@ struct window *gui_create_window(const char *title, int x, int y, int w,
   win->has_titlebar = true;
   win->resizable = true;
 
+  /* Reset all callbacks and userdata - critical to prevent stale pointers */
+  win->on_draw = NULL;
+  win->on_mouse = NULL;
+  win->on_key = NULL;
+  win->on_close = NULL;
+  win->userdata = NULL;
+
   /* Allocate content buffer */
   int content_h = h - TITLEBAR_HEIGHT - BORDER_WIDTH * 2;
   int content_w = w - BORDER_WIDTH * 2;
@@ -3548,6 +3555,42 @@ void gui_handle_mouse_event(int x, int y, int buttons) {
       }
     }
 
+    /* Check menu bar dropdown BEFORE desktop icons (dropdown overlaps desktop
+     * area) */
+    if (menu_open == 1 && y >= MENU_BAR_HEIGHT && y < MENU_BAR_HEIGHT + 80 &&
+        x >= 8 && x < 168) {
+      int dropdown_y = MENU_BAR_HEIGHT;
+      int rel_y = y - dropdown_y;
+
+      printk("DROPDOWN CLICK: x=%d y=%d rel_y=%d\\n", x, y, rel_y);
+
+      /* About Vib-OS (y+10) */
+      if (rel_y >= 2 && rel_y < 32) {
+        printk("Opening About window\\n");
+        gui_create_window("About", 280, 180, 420, 260);
+        menu_open = 0;
+        return;
+      }
+      /* Settings (y+40) */
+      if (rel_y >= 32 && rel_y < 58) {
+        printk("Opening Settings window\\n");
+        gui_create_window("Settings", 200, 120, 380, 320);
+        menu_open = 0;
+        return;
+      }
+      /* Restart (y+58) */
+      if (rel_y >= 58 && rel_y < 80) {
+        printk("Restart requested\\n");
+        extern void arch_halt(void);
+        arch_halt();
+        menu_open = 0;
+        return;
+      }
+      /* Click in dropdown but not on item - close menu */
+      menu_open = 0;
+      return;
+    }
+
     /* Check if click is on desktop area (not on window) */
     int on_window = 0;
     for (struct window *win = window_stack; win; win = win->next) {
@@ -3599,26 +3642,38 @@ void gui_handle_mouse_event(int x, int y, int buttons) {
   /* Check menu bar and dropdown clicks */
   if (y < MENU_BAR_HEIGHT ||
       (menu_open && y < MENU_BAR_HEIGHT + 80 && x < 170)) {
+
+    printk("MENU DEBUG: x=%d y=%d menu_open=%d MBH=%d\\n", x, y, menu_open,
+           MENU_BAR_HEIGHT);
+
     /* If dropdown is open, check dropdown item clicks */
     if (menu_open == 1 && y >= MENU_BAR_HEIGHT && y < MENU_BAR_HEIGHT + 80 &&
         x >= 8 && x < 168) {
       int dropdown_y = MENU_BAR_HEIGHT;
+      int rel_y = y - dropdown_y;
 
-      /* About Vib-OS (y offset 10-28) */
-      if (y >= dropdown_y + 8 && y < dropdown_y + 30) {
+      printk("MENU CLICK: x=%d y=%d rel_y=%d dropdown_y=%d\\n", x, y, rel_y,
+             dropdown_y);
+
+      /* About Vib-OS (y+10) - expanded range */
+      if (rel_y >= 2 && rel_y < 32) {
+        printk("MENU: Opening About window\\n");
         gui_create_window("About", 280, 180, 420, 260);
         menu_open = 0;
         return;
       }
-      /* Settings (y offset 40-56) */
-      if (y >= dropdown_y + 36 && y < dropdown_y + 56) {
+      /* Settings (y+40) - expanded range */
+      if (rel_y >= 32 && rel_y < 58) {
+        printk("MENU: Opening Settings window\\n");
         gui_create_window("Settings", 200, 120, 380, 320);
         menu_open = 0;
         return;
       }
-      /* Restart (y offset 58-76) */
-      if (y >= dropdown_y + 54 && y < dropdown_y + 76) {
-        /* Just close menu for now */
+      /* Restart (y+58) - expanded range */
+      if (rel_y >= 58 && rel_y < 80) {
+        printk("MENU: Restart requested\\n");
+        extern void arch_halt(void);
+        arch_halt();
         menu_open = 0;
         return;
       }

@@ -6,7 +6,7 @@
 ![Platform](https://img.shields.io/badge/platform-ARM64%20%7C%20x86__64-blue)
 ![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-M1%20%7C%20M2%20%7C%20M3%20%7C%20M4-orange)
 ![Raspberry Pi](https://img.shields.io/badge/Raspberry%20Pi-4%20%7C%205-red)
-![Lines](https://img.shields.io/badge/lines-20k+-yellow)
+![Lines](https://img.shields.io/badge/lines-25k+-yellow)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ```
@@ -19,9 +19,13 @@
 Vib-OS v0.5.0 - Multi-Architecture OS with Full GUI
 ```
 
+<p align="center">
+  <img src="screenshots/main.png" alt="Vib-OS Desktop" width="800">
+</p>
+
 ## Overview
 
-Vib-OS is a from-scratch, Unix-like operating system with **full multi-architecture support** for **ARM64** and **x86_64**. It features a custom kernel, a modern macOS-inspired graphical user interface, a full TCP/IP networking stack, and a Virtual File System (VFS). Built with **20,000+ lines** of C and Assembly, it runs natively on QEMU, real hardware (Raspberry Pi 4/5, x86_64 PCs), and Apple Silicon (via UTM).
+Vib-OS is a from-scratch, Unix-like operating system with **full multi-architecture support** for **ARM64** and **x86_64**. It features a custom kernel, a modern macOS-inspired graphical user interface, a full TCP/IP networking stack, and a Virtual File System (VFS). Built with **25,000+ lines** of C and Assembly, it runs natively on QEMU, real hardware (Raspberry Pi 4/5, x86_64 PCs), and Apple Silicon (via UTM).
 
 ## 🎯 Multi-Architecture Support
 
@@ -43,25 +47,33 @@ Vib-OS is a from-scratch, Unix-like operating system with **full multi-architect
 
 ## 📸 Screenshots
 
-### Desktop & File Manager
+### Main Desktop
+![Main Desktop](screenshots/main.png)
+*Vib-OS desktop with animated dock, menu bar, and wallpaper system.*
+
+### File Manager
 ![File Manager](screenshots/filemanager.png)
 *Modern file manager with icon grid, navigation, file creation (New File/Folder), and renaming capabilities.*
 
 ### Terminal & Shell
 ![Terminal](screenshots/terminal.png)
-*VT100-compatible terminal with command history, `ls`, `cd`, and shell utilities.*
+*VT100-compatible terminal with command history, Python and Nano language support.*
 
-### Applications (Snake Game)
+### Image Viewer
+![Image Viewer](screenshots/image-viewer.png)
+*JPEG image viewer with zoom, rotate, and pan support.*
+
+### Snake Game
 ![Snake](screenshots/snake.png)
 *Interactive Snake game with score tracking and keyboard controls.*
 
-### Calculator
-![Calculator](screenshots/calculator.png)
-*Fully functional calculator with arithmetic operations.*
+### Context Menu
+![Context Menu](screenshots/context-menu.png)
+*Right-click context menu for desktop operations.*
 
-### Doom
-![Doom](screenshots/doom.png)
-*Doom running natively on Vib-OS with full graphics and input support.*
+### Wallpaper Settings
+![Wallpaper System](screenshots/wallpaper-system.png)
+*Customizable wallpaper system with live preview.*
 
 ## 🏗 Architecture
 
@@ -71,6 +83,8 @@ graph TD
         GUI[Window Manager & GUI Apps]
         Shell[Terminal / Shell]
         Doom[Doom Engine]
+        Python[Python Interpreter]
+        Nano[Nano Language]
     end
 
     subgraph Kernel ["Kernel (EL1/Ring 0)"]
@@ -81,6 +95,12 @@ graph TD
             Process[Process Scheduler]
             Net[TCP/IP Networking Stack]
             Mem["Memory Manager (PMM/VMM)"]
+        end
+        
+        subgraph Security
+            Spinlock[Spinlock Synchronization]
+            Sandbox[Media Sandbox]
+            ASLR[Address Space Randomization]
         end
         
         subgraph Drivers
@@ -96,6 +116,8 @@ graph TD
     GUI --> Syscall
     Shell --> Syscall
     Doom --> Syscall
+    Python --> Syscall
+    Nano --> Syscall
     
     Syscall --> VFS
     Syscall --> Process
@@ -105,6 +127,7 @@ graph TD
     Net --> VirtioNet
     Process --> Mem
     
+    Security --> Mem
     Drivers --> Hardware
 ```
 
@@ -114,9 +137,10 @@ graph TD
 - **Window Manager**: Draggable and **resizable** windows with focus management and z-ordering
 - **Traffic Light Controls**: Close, Minimize, and Maximize buttons (macOS-style)
 - **Window Resizing**: Drag any edge or corner to resize windows (all 8 directions supported)
-- **Taskbar & Dock**: Animated dock with hover labels; top menu bar with clock and WiFi status
+- **Taskbar & Dock**: Animated dock with hover magnification and labels; top menu bar with clock and WiFi status
 - **Compositor**: Double-buffered rendering engine for flicker-free visuals
 - **Modern Design**: Clean, intuitive interface inspired by macOS
+- **Context Menus**: Right-click menus for desktop and file operations
 
 ### 📂 File System (VFS)
 - **Virtual File System**: Unified interface for different filesystems
@@ -130,6 +154,24 @@ graph TD
   - Notepad integration for editing text files
   - File icons and visual feedback
 
+### 🐍 Programming Language Support
+- **Python Interpreter**: Run Python scripts directly in the terminal
+  ```bash
+  $ python examples/hello.py
+  Hello, Vib-OS!
+  
+  $ python examples/fibonacci.py
+  0, 1, 1, 2, 3, 5, 8, 13, 21, 34
+  ```
+- **Nano Language**: Lightweight scripting language ([github.com/jordanhubbard/nanolang](https://github.com/jordanhubbard/nanolang))
+  ```bash
+  $ nano examples/hello.nano
+  Hello from Nano!
+  
+  $ nano examples/calculator.nano
+  Result: 42
+  ```
+
 ### 🌐 Networking
 - **Virtio-Net Driver**: High-performance network interface
 - **TCP/IP Stack**: Custom implementation of Ethernet, ARP, IP, ICMP, UDP, and TCP
@@ -137,6 +179,12 @@ graph TD
 - **DNS Resolution**: Built-in DNS client
 - **Socket API**: Berkeley sockets-compatible interface
 - **WiFi Status**: Visual indicator in the menu bar
+
+### 🔒 Security Features
+- **Spinlock Synchronization**: IRQ-safe spinlocks for ARM64 and x86_64
+- **Media Sandbox**: Fault-isolating sandbox for media decoders
+- **ASLR**: Address Space Layout Randomization for process protection
+- **NX Protections**: Non-executable page support
 
 ### 🛠 Core System
 - **Multi-Architecture Kernel**: Supports ARM64 and x86_64 with clean abstraction layer
@@ -170,15 +218,16 @@ graph TD
 - **Media Pipeline**: Load and decode media files from VFS
 
 ### 📦 Applications
-- **Terminal**: `ls`, `cd`, `help`, `clear`, `cat`, `echo`, `play`, `view` commands
+- **Terminal**: `ls`, `cd`, `help`, `clear`, `cat`, `echo`, `play`, `view`, `python`, `nano` commands
 - **Notepad**: Text editor with save/load functionality backed by VFS
-- **Image Viewer**: JPEG image viewer with zoom and pan support
+- **Image Viewer**: JPEG image viewer with zoom, rotate, and pan support
 - **Audio Player**: MP3 playback support via minimp3 decoder
 - **Snake**: Classic game with graphics and score tracking
 - **Calculator**: Basic arithmetic operations with GUI
 - **File Manager**: Browse, create, rename, and delete files (click images/audio to open)
 - **Doom**: Full Doom port with graphics, input, and sound
 - **Clock**: Real-time analog clock with hour/minute/second hands
+- **Settings**: System settings including wallpaper configuration
 - **About**: System information dialog
 
 ## 🚀 Quick Start
@@ -207,7 +256,7 @@ sudo pacman -S qemu-system-aarch64 qemu-system-x86 aarch64-linux-gnu-gcc make
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/vib-OS.git
+git clone https://github.com/viralcode/vib-OS.git
 cd vib-OS
 
 # Build everything (kernel, drivers, userspace)
@@ -337,6 +386,8 @@ Use UTM (https://mac.getutm.app/):
 - ✅ Process management and scheduling
 - ✅ Input (keyboard and mouse)
 - ✅ Doom runs with full graphics
+- ✅ Python and Nano language interpreters
+- ✅ Security features (spinlocks, sandbox, ASLR)
 
 ### Known Issues
 1. **Sound Support**: Intel HDA driver initializes but audio playback is unstable
@@ -390,16 +441,21 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **DOOM**: id Software for the original Doom engine
 - **minimp3**: lieff for the MP3 decoder library
 - **picojpeg**: Rich Geldreich for the JPEG decoder
+- **Nano Language**: [Jordan Hubbard](https://github.com/jordanhubbard/nanolang) for the Nano scripting language
 - **QEMU**: The QEMU team for the excellent emulator
 - **OSDev Community**: For invaluable resources and documentation
 
 ## 📞 Contact
 
-- **GitHub**: [yourusername/vib-OS](https://github.com/yourusername/vib-OS)
-- **Issues**: [Report bugs or request features](https://github.com/yourusername/vib-OS/issues)
+**Author:** [JIJO JOHN](https://jijojohn.me)
+
+- **Website**: [jijojohn.me](https://jijojohn.me)
+- **GitHub**: [github.com/viralcode](https://github.com/viralcode)
+- **Repository**: [viralcode/vib-OS](https://github.com/viralcode/vib-OS)
+- **Issues**: [Report bugs or request features](https://github.com/viralcode/vib-OS/issues)
 
 ---
 
-**Made with ❤️ by the Vib-OS Team**
+**Made with ❤️ by [JIJO JOHN](https://jijojohn.me)**
 
 *"Building an OS from scratch, one line at a time."*
