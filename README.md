@@ -75,6 +75,10 @@ Vib-OS is a from-scratch, Unix-like operating system with **full multi-architect
 ![Wallpaper System](screenshots/wallpaper-system.png)
 *Customizable wallpaper system with live preview.*
 
+### Doom
+![Doom](screenshots/doom.png)
+*Classic Doom running natively with full graphics, input, and sound support.*
+
 ## 🏗 Architecture
 
 ```mermaid
