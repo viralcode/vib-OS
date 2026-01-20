@@ -16,7 +16,7 @@
   \ V /| || |_) |  | |_| |___) |
    \_/ |_||_.__/    \___/|____/ 
 
-Vib-OS v0.5.0 - Multi-Architecture OS with Full GUI
+Vib-OS v2.2.0 - Multi-Architecture OS with Full GUI
 ```
 
 <p align="center">
