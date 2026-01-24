@@ -298,8 +298,7 @@ make qemu
 
 ```bash
 # Build for x86_64
-make -f Makefile.multiarch ARCH=x86_64 clean
-make -f Makefile.multiarch ARCH=x86_64 kernel
+
 
 # Test in QEMU
 make -f Makefile.multiarch ARCH=x86_64 qemu
@@ -345,19 +344,7 @@ sudo dd if=image/unixos.img of=/dev/sdX bs=4M status=progress && sync
 
 ### For x86_64 PC
 
-```bash
-# Create UEFI bootable image
-./scripts/create-uefi-image.sh
 
-# Create BIOS bootable image
-./scripts/create-bios-image.sh
-
-# Create bootable ISO
-./scripts/create-iso.sh
-
-# Write to USB drive
-sudo dd if=vibos-uefi.img of=/dev/sdX bs=4M status=progress && sync
-```
 
 ## 🧪 Testing
 
@@ -391,11 +378,7 @@ make -f Makefile.multiarch ARCH=x86_64 qemu
 
 ### Apple Silicon (M1/M2/M3/M4)
 
-Use UTM (https://mac.getutm.app/):
-1. Create new ARM64 virtual machine
-2. Use `image/unixos.img` as boot disk
-3. Configure 2GB+ RAM
-4. Start VM
+Use Qemu. 
 
 ## 🚧 Current Status & Known Issues
 
