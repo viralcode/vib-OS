@@ -261,7 +261,7 @@ static char term_input[TERM_INPUT_MAX];
 static int term_input_len = 0;
 static char term_history[TERM_HISTORY_LINES][80];
 static int term_history_count = 0;
-static int term_scroll = 0;
+/* static int term_scroll = 0; */ /* TODO: implement terminal scrolling */
 
 /* Snake game state */
 #define SNAKE_MAX_LEN 100
@@ -2800,7 +2800,7 @@ static void draw_icon_web(int x, int y, int size) {
 
 /* Draw dock with hover animations - using vector icons */
 static void draw_dock(void) {
-  int mouse_active = (mouse_y >= primary_display.height - DOCK_HEIGHT - 40);
+  int mouse_active = (mouse_y >= (int)(primary_display.height - DOCK_HEIGHT - 40));
 
   /* 1. Calculate target sizes for all icons based on magnification */
   int icon_sizes[NUM_DOCK_ICONS];
@@ -2858,7 +2858,7 @@ static void draw_dock(void) {
     if (i < NUM_DOCK_ICONS - 1)
       total_content_w += DOCK_PADDING;
   }
-  int dock_content_w = total_content_w; /* Used by old code too */
+  (void)total_content_w; /* Was dock_content_w - kept for potential future use */
   int dock_w = total_content_w + 32;    /* Padding */
   int dock_h = DOCK_HEIGHT - 12;
   int dock_x = (primary_display.width - dock_w) / 2;
@@ -2992,7 +2992,7 @@ static void draw_dock(void) {
 }
 
 /* Cached wallpaper for performance - gradient is expensive to recalculate */
-static uint32_t *cached_wallpaper = NULL;
+/* static uint32_t *cached_wallpaper = NULL; */ /* TODO: implement wallpaper caching */
 static int wallpaper_cached = 0;
 static int wallpaper_cached_idx = -1; /* Which wallpaper is cached */
 
@@ -3410,8 +3410,6 @@ static int resize_start_win_x = 0, resize_start_win_y = 0;
 #define MIN_WINDOW_HEIGHT 100
 
 void gui_handle_mouse_event(int x, int y, int buttons) {
-  int prev_x = mouse_x;
-  int prev_y = mouse_y;
   mouse_x = x;
   mouse_y = y;
 
@@ -3432,7 +3430,7 @@ void gui_handle_mouse_event(int x, int y, int buttons) {
 
   /* Track for double-click detection */
   static int last_click_x = 0, last_click_y = 0;
-  static uint64_t last_click_time = 0;
+  /* static uint64_t last_click_time = 0; */ /* TODO: implement double-click timing */
   static int click_count = 0;
 
   /* Handle window dragging */
@@ -3938,10 +3936,11 @@ void gui_handle_mouse_event(int x, int y, int buttons) {
         case 2: /* Calculator */
           gui_create_window("Calculator", spawn_x + 60, spawn_y + 40, 260, 380);
           break;
-        case 3: /* Notepad */
+        case 3: /* Notepad */ {
           /* Call open with NULL to just open blank */
           extern void gui_open_notepad(const char *path);
           gui_open_notepad(NULL);
+        }
           break;
         case 4: /* Settings */
           gui_create_window("Settings", spawn_x + 20, spawn_y + 30, 380, 320);
@@ -4184,15 +4183,27 @@ struct window *gui_create_file_manager_path(int x, int y, const char *path) {
 }
 
 static void notepad_on_mouse(struct window *win, int x, int y, int buttons) {
-  /* Check Save Button */
-  /* Toolbar area */
+  (void)win;
+  
+  /* Only process on left mouse button click */
+  if (!(buttons & 1)) {
+    return;
+  }
+  
+  /* Toolbar button layout (matching draw code):
+   * bx starts at BORDER_WIDTH + 8, buttons are 50px wide with 4px spacing
+   * New:  BORDER_WIDTH + 8  to BORDER_WIDTH + 58
+   * Open: BORDER_WIDTH + 62 to BORDER_WIDTH + 112
+   * Save: BORDER_WIDTH + 116 to BORDER_WIDTH + 166
+   */
   int content_y = BORDER_WIDTH + TITLEBAR_HEIGHT;
   if (y >= content_y && y < content_y + 30) {
-    if (x >= BORDER_WIDTH + 10 && x < BORDER_WIDTH + 70) {
+    /* Check Save Button (third button) */
+    if (x >= BORDER_WIDTH + 116 && x < BORDER_WIDTH + 166) {
       /* Save clicked */
       if (notepad_filepath[0]) {
-        /* Open for writing */
-        struct file *f = vfs_open(notepad_filepath, O_RDWR | O_CREAT, 0644);
+        /* Open for writing with truncate to clear existing content */
+        struct file *f = vfs_open(notepad_filepath, O_RDWR | O_CREAT | O_TRUNC, 0644);
         if (f) {
           /* Determine length */
           int len = 0;
@@ -4255,6 +4266,7 @@ void gui_open_notepad(const char *path) {
 }
 
 static void rename_on_mouse(struct window *win, int x, int y, int buttons) {
+  (void)buttons; /* Used for click detection via coordinate check */
   /* Check Save Button */
   int content_y = BORDER_WIDTH + TITLEBAR_HEIGHT;
   if (y >= content_y && y < content_y + 30) {
@@ -4661,9 +4673,9 @@ static void image_viewer_on_draw(struct window *win) {
   int btn_x = tb_x + 16;
 
   /* Button icons (using ASCII for now) */
-  const char *icons[] = {"<", ">", "R", "L", "+", "-", "F", "X"};
-  const char *labels[] = {"Prev",  "Next",  "Rot R", "Rot L",
-                          "Zoom+", "Zoom-", "Fit",   "Full"};
+  /* TODO: Use these for button tooltips */
+  /* const char *icons[] = {"<", ">", "R", "L", "+", "-", "F", "X"}; */
+  /* const char *labels[] = {"Prev", "Next", "Rot R", "Rot L", "Zoom+", "Zoom-", "Fit", "Full"}; */
   uint32_t btn_bg = 0x374151;
   uint32_t btn_hover = 0x4B5563;
   uint32_t icon_color = 0xE5E7EB;

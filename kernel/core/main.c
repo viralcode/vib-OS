@@ -149,13 +149,17 @@ static void init_subsystems(void *dtb) {
   process_init();
 
   /* ================================================================= */
-  /* Phase 4: Filesystems */
+  /* Phase 4: Block Devices & Filesystems */
   /* ================================================================= */
 
-  printk(KERN_INFO "[INIT] Phase 4: Filesystems\n");
+  printk(KERN_INFO "[INIT] Phase 4: Block Devices & Filesystems\n");
 
-  /* Initialize Virtual Filesystem */
-  printk(KERN_INFO "  Initializing VFS...\n");
+  /* Initialize VirtIO Block driver for persistent storage */
+  printk(KERN_INFO "  Initializing VirtIO block driver...\n");
+  extern int virtio_blk_init(void);
+  extern bool virtio_blk_is_ready(void);
+  int blk_ret = virtio_blk_init();
+
   /* Initialize Virtual Filesystem */
   printk(KERN_INFO "  Initializing VFS...\n");
   vfs_init();
@@ -165,10 +169,29 @@ static void init_subsystems(void *dtb) {
   extern int ramfs_init(void);
   ramfs_init();
 
-  /* Mount root filesystem */
-  printk(KERN_INFO "  Mounting root filesystem...\n");
-  if (vfs_mount("ramfs", "/", "ramfs", 0, NULL) != 0) {
-    panic("Failed to mount root filesystem!");
+  /* Initialize FAT32 filesystem driver */
+  printk(KERN_INFO "  Initializing FAT32 driver...\n");
+  extern int fat32_init(void);
+  fat32_init();
+
+  /* Try to mount FAT32 from disk first, fall back to RamFS */
+  int mounted_disk = 0;
+  if (blk_ret == 0 && virtio_blk_is_ready()) {
+    printk(KERN_INFO "  Attempting to mount FAT32 from disk...\n");
+    if (vfs_mount("vda", "/", "fat32", 0, NULL) == 0) {
+      printk(KERN_INFO "  Mounted FAT32 filesystem from disk!\n");
+      mounted_disk = 1;
+    } else {
+      printk(KERN_WARNING "  FAT32 mount failed, falling back to RamFS\n");
+    }
+  }
+
+  /* Fall back to RamFS if no disk available */
+  if (!mounted_disk) {
+    printk(KERN_INFO "  Mounting RamFS as root filesystem...\n");
+    if (vfs_mount("ramfs", "/", "ramfs", 0, NULL) != 0) {
+      panic("Failed to mount root filesystem!");
+    }
   }
 
   /* Populate filesystem with sample data */
@@ -399,10 +422,6 @@ static void init_subsystems(void *dtb) {
  * start_init_process - Start the first userspace process (PID 1)
  */
 
-/* Global terminal pointer for keyboard callback */
-static void *g_active_terminal = 0;
-
-/* Keyboard callback wrapper */
 /* Keyboard callback wrapper */
 static void keyboard_handler(int key) {
   /* gui_handle_key_event is now called via gui_key_callback, not here */

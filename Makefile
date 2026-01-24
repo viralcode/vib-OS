@@ -56,7 +56,7 @@ CROSS_TARGET := --target=aarch64-unknown-none-elf
 
 # Compiler flags
 # CPU target: generic works on QEMU and most ARM64 hardware
-CFLAGS_COMMON := -Wall -Wextra -Wno-unused-function -ffreestanding -fstack-protector-strong \
+CFLAGS_COMMON := -std=gnu11 -Wall -Wextra -Wno-unused-function -ffreestanding -fstack-protector-strong \
                  -fno-pic -mcpu=cortex-a72 -O2 -g
 
 CFLAGS_KERNEL := $(CFLAGS_COMMON) $(CROSS_TARGET) \
@@ -85,7 +85,7 @@ QEMU_FLAGS := -M $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) \
 # Main Targets
 # ============================================================================
 
-.PHONY: all clean kernel drivers libc userspace runtimes image qemu qemu-debug test help
+.PHONY: all clean kernel drivers libc userspace runtimes image qemu qemu-debug test help run run-gui run-disk disk-image
 
 all: kernel drivers libc userspace runtimes image
 	@echo "=========================================="
@@ -110,6 +110,10 @@ help:
 	@echo "Test targets:"
 	@echo "  qemu         - Run in QEMU emulator"
 	@echo "  qemu-debug   - Run with GDB server"
+	@echo "  run          - Run kernel in QEMU (text mode)"
+	@echo "  run-gui      - Run kernel with GUI display"
+	@echo "  run-disk     - Run with persistent FAT32 disk storage"
+	@echo "  disk-image   - Create FAT32 disk image for persistence"
 	@echo "  test         - Run test suite"
 	@echo ""
 	@echo "Utility targets:"
@@ -316,6 +320,29 @@ run-gpu: kernel
 		-device intel-hda -device hda-duplex,audiodev=snd0 \
 		-serial stdio \
 		-kernel $(KERNEL_BINARY)
+
+# Run with persistent disk storage
+run-disk: kernel disk-image
+	@echo "[RUN] Starting Vib-OS with persistent disk..."
+	@qemu-system-aarch64 -M virt,gic-version=3 \
+		-cpu max -m 512M \
+		-global virtio-mmio.force-legacy=false \
+		-device ramfb \
+		-device virtio-keyboard-device \
+		-device virtio-tablet-device \
+		-device virtio-blk-device,drive=hd0 \
+		-drive id=hd0,if=none,format=raw,file=$(IMAGE_DIR)/disk.img \
+		-device virtio-net-device,netdev=net0 \
+		-netdev user,id=net0 \
+		-serial stdio \
+		-kernel $(KERNEL_BINARY)
+
+# Create a FAT32 disk image
+disk-image: $(IMAGE_DIR)
+	@echo "[DISK] Creating FAT32 disk image..."
+	@./scripts/create-disk-image.sh 64 $(IMAGE_DIR)/disk.img || \
+		(dd if=/dev/zero of=$(IMAGE_DIR)/disk.img bs=1M count=64 2>/dev/null && \
+		echo "[DISK] Created raw disk image (format manually if needed)")
 
 # ============================================================================
 # Toolchain Setup
