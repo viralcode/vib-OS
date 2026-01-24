@@ -25,7 +25,7 @@ Vib-OS v2.2.0 - Multi-Architecture OS with Full GUI
 
 ## Overview
 
-Vib-OS is a from-scratch, Unix-like operating system with **full multi-architecture support** for **ARM64** and **x86_64**. It features a custom kernel, a modern macOS-inspired graphical user interface, a full TCP/IP networking stack, and a Virtual File System (VFS). Built with **25,000+ lines** of C and Assembly, it runs natively on QEMU, real hardware (Raspberry Pi 4/5, x86_64 PCs), and Apple Silicon (via UTM).
+Vib-OS is a from-scratch, Unix-like operating system with **full multi-architecture support** for **ARM64** and **x86_64**. It features a custom kernel, a modern macOS-inspired graphical user interface, a full TCP/IP networking stack, and a Virtual File System (VFS). Built with **25,000+ lines** of C and Assembly, it runs natively on QEMU, real hardware (Raspberry Pi 4/5, x86_64 PCs), and Apple Silicon.
 
 ## 🎯 Multi-Architecture Support
 
