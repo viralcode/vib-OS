@@ -210,6 +210,8 @@ static void init_subsystems(void *dtb) {
   extern const unsigned int bootstrap_square_jpg_len;
   extern const unsigned char bootstrap_wallpaper_jpg[];
   extern const unsigned int bootstrap_wallpaper_jpg_len;
+  extern const unsigned char bootstrap_wallpaper_png[];
+  extern const unsigned int bootstrap_wallpaper_png_len;
   /* Real photos from the internet */
   extern const unsigned char bootstrap_nature_jpg[];
   extern const unsigned int bootstrap_nature_jpg_len;
@@ -236,6 +238,8 @@ static void init_subsystems(void *dtb) {
                           bootstrap_square_jpg_len);
   ramfs_create_file_bytes("Pictures/wallpaper.jpg", 0644,
                           bootstrap_wallpaper_jpg, bootstrap_wallpaper_jpg_len);
+  ramfs_create_file_bytes("Pictures/wallpaper.png", 0644,
+                          bootstrap_wallpaper_png, bootstrap_wallpaper_png_len);
   /* HD Photos */
   ramfs_create_file_bytes("Pictures/nature.jpg", 0644, hd_wallpaper_nature_jpg,
                           hd_wallpaper_nature_jpg_len);
