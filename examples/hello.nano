@@ -1,0 +1,34 @@
+// Hello World in NanoLang for Vib-OS
+// Run with: run hello.nano
+// Compile with: nanoc hello.nano -o hello
+
+// NanoLang is a minimal, LLM-friendly language
+// that transpiles to C for native performance
+
+fn greet(name: str) -> str {
+    return "Hello, " + name + "!";
+}
+
+fn factorial(n: int) -> int {
+    if n <= 1 {
+        return 1;
+    }
+    return n * factorial(n - 1);
+}
+
+fn main() {
+    print("========================================");
+    print("  Welcome to Vib-OS NanoLang Demo");
+    print("========================================");
+    
+    let message = greet("Vib-OS User");
+    print(message);
+    
+    // Factorial demo
+    let num = 5;
+    let result = factorial(num);
+    print("Factorial of 5 = " + result);
+    
+    print("");
+    print("NanoLang is working on Vib-OS!");
+}

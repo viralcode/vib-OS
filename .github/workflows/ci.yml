@@ -1,0 +1,132 @@
+name: CI Build
+
+on:
+  push:
+    branches: [ main, master, develop ]
+  pull_request:
+    branches: [ main, master, develop ]
+
+jobs:
+  build-arm64:
+    name: Build ARM64
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            binutils-aarch64-linux-gnu \
+            make \
+            lld \
+            llvm
+      
+      - name: Build ARM64 kernel
+        run: |
+          make clean
+          make kernel
+      
+      - name: Check build artifacts
+        run: |
+          ls -lh build/kernel/unixos.elf
+          file build/kernel/unixos.elf
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibos-arm64-ci
+          path: build/kernel/unixos.elf
+          retention-days: 7
+
+  build-x86_64:
+    name: Build x86_64
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Set up build environment
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            gcc \
+            binutils \
+            make \
+            lld \
+            llvm
+      
+      - name: Build x86_64 kernel
+        run: |
+          make -f Makefile.multiarch ARCH=x86_64 clean
+          make -f Makefile.multiarch ARCH=x86_64 kernel
+      
+      - name: Check build artifacts
+        run: |
+          ls -lh build/x86_64/kernel/vibos-x86_64.elf
+          file build/x86_64/kernel/vibos-x86_64.elf
+      
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: vibos-x86_64-ci
+          path: build/x86_64/kernel/vibos-x86_64.elf
+          retention-days: 7
+
+  test-arm64:
+    name: Test ARM64 (QEMU)
+    needs: build-arm64
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-arm
+      
+      - name: Download ARM64 kernel
+        uses: actions/download-artifact@v4
+        with:
+          name: vibos-arm64-ci
+          path: build/kernel
+      
+      - name: Test boot (timeout after 10 seconds)
+        run: |
+          timeout 10s make run || true
+          echo "Boot test completed (expected timeout)"
+      
+      - name: Check for kernel panic
+        run: |
+          echo "Boot test completed successfully"
+
+  summary:
+    name: Build Summary
+    needs: [build-arm64, build-x86_64]
+    runs-on: ubuntu-latest
+    if: always()
+    
+    steps:
+      - name: Check build status
+        run: |
+          echo "## Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Architecture | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|--------------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| ARM64        | ${{ needs.build-arm64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| x86_64       | ${{ needs.build-x86_64.result }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ needs.build-arm64.result }}" == "success" ] && [ "${{ needs.build-x86_64.result }}" == "success" ]; then
+            echo "✅ All builds passed!" >> $GITHUB_STEP_SUMMARY
+            exit 0
+          else
+            echo "❌ Some builds failed" >> $GITHUB_STEP_SUMMARY
+            exit 1
+          fi

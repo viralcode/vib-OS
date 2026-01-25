@@ -1,0 +1,299 @@
+# Vib-OS Multi-Architecture Makefile
+# Supports: ARM64, x86_64, x86 (BIOS)
+
+# ============================================================================
+# Configuration
+# ============================================================================
+
+# Target architecture - can be overridden: make ARCH=x86_64
+ARCH ?= arm64
+
+# Directories
+ROOT_DIR := $(shell pwd)
+BUILD_DIR := $(ROOT_DIR)/build/$(ARCH)
+BOOT_DIR := $(ROOT_DIR)/boot
+KERNEL_DIR := $(ROOT_DIR)/kernel
+DRIVERS_DIR := $(ROOT_DIR)/drivers
+LIBC_DIR := $(ROOT_DIR)/libc
+USERSPACE_DIR := $(ROOT_DIR)/userspace
+RUNTIMES_DIR := $(ROOT_DIR)/runtimes
+IMAGE_DIR := $(ROOT_DIR)/image
+SYSROOT := $(BUILD_DIR)/sysroot
+
+# Detect host OS
+UNAME_S := $(shell uname -s)
+
+# ============================================================================
+# Architecture-Specific Configuration
+# ============================================================================
+
+ifeq ($(ARCH),arm64)
+    CROSS_TARGET := --target=aarch64-unknown-none-elf
+    ARCH_CFLAGS := -mcpu=cortex-a72 -mgeneral-regs-only
+    QEMU := qemu-system-aarch64
+    QEMU_MACHINE := virt,gic-version=3
+    QEMU_CPU := max
+    LINKER_SCRIPT := $(KERNEL_DIR)/linker.ld
+    KERNEL_ENTRY := _start
+else ifeq ($(ARCH),x86_64)
+    CROSS_TARGET := --target=x86_64-unknown-none-elf
+    ARCH_CFLAGS := -mcmodel=kernel -mno-red-zone -mno-mmx -mno-sse -mno-sse2
+    QEMU := qemu-system-x86_64
+    QEMU_MACHINE := q35
+    QEMU_CPU := qemu64
+    LINKER_SCRIPT := $(KERNEL_DIR)/linker_x86_64.ld
+    KERNEL_ENTRY := _start
+else ifeq ($(ARCH),x86)
+    CROSS_TARGET := --target=i686-unknown-none-elf
+    ARCH_CFLAGS := -m32 -march=i686
+    QEMU := qemu-system-i386
+    QEMU_MACHINE := pc
+    QEMU_CPU := pentium3
+    LINKER_SCRIPT := $(KERNEL_DIR)/linker_x86.ld
+    KERNEL_ENTRY := _start
+else
+    $(error Unsupported architecture: $(ARCH). Use arm64, x86_64, or x86)
+endif
+
+# ============================================================================
+# Toolchain
+# ============================================================================
+
+ifeq ($(UNAME_S),Darwin)
+    # macOS with Homebrew
+    LLVM_PATH ?= /opt/homebrew/opt/llvm/bin
+    BREW_PATH ?= /opt/homebrew/bin
+    export PATH := $(LLVM_PATH):$(BREW_PATH):$(PATH)
+    CC := $(LLVM_PATH)/clang
+    AS := $(LLVM_PATH)/clang
+    LD := $(BREW_PATH)/ld.lld
+    AR := $(LLVM_PATH)/llvm-ar
+    OBJCOPY := $(LLVM_PATH)/llvm-objcopy
+    OBJDUMP := $(LLVM_PATH)/llvm-objdump
+else
+    # Linux
+    LLVM_PATH ?= /usr/bin
+    CC := clang
+    AS := clang
+    LD := ld.lld
+    AR := llvm-ar
+    OBJCOPY := llvm-objcopy
+    OBJDUMP := llvm-objdump
+endif
+
+# ============================================================================
+# Compiler Flags
+# ============================================================================
+
+CFLAGS_COMMON := -Wall -Wextra -Wno-unused-function -ffreestanding \
+                 -fno-stack-protector -fno-pic -O2 -g
+
+CFLAGS_KERNEL := $(CFLAGS_COMMON) $(CROSS_TARGET) $(ARCH_CFLAGS) \
+                 -I$(KERNEL_DIR)/include -I$(KERNEL_DIR) \
+                 -fno-builtin -nostdlib -nostdinc \
+                 -DARCH_$(shell echo $(ARCH) | tr a-z A-Z | tr - _)
+
+ASFLAGS := $(CROSS_TARGET) $(ARCH_CFLAGS) -I$(KERNEL_DIR)/include
+
+LDFLAGS_KERNEL := -nostdlib -static -T $(LINKER_SCRIPT) -e $(KERNEL_ENTRY)
+
+# ============================================================================
+# QEMU Configuration
+# ============================================================================
+
+QEMU_MEMORY := 4G
+QEMU_FLAGS := -M $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) \
+              -nographic -serial mon:stdio
+
+# ============================================================================
+# Source Files
+# ============================================================================
+
+# Kernel sources (common)
+KERNEL_SOURCES_C := $(shell find $(KERNEL_DIR)/core -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/mm -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/fs -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/net -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/sched -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/syscall -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/ipc -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/lib -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/loader -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/gui -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/media -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/apps -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/drivers -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/sync -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/sandbox -name '*.c' 2>/dev/null)
+
+# Architecture-specific sources
+KERNEL_SOURCES_C += $(shell find $(KERNEL_DIR)/arch/$(ARCH) -name '*.c' 2>/dev/null)
+KERNEL_SOURCES_ASM := $(shell find $(KERNEL_DIR)/arch/$(ARCH) -name '*.S' 2>/dev/null)
+# Assembly files are now architecture-specific only
+
+# Driver sources (exclude uart for x86_64/x86 as they have arch-specific versions)
+DRIVER_SOURCES := $(shell find $(DRIVERS_DIR) -name '*.c' 2>/dev/null)
+ifeq ($(ARCH),x86_64)
+    DRIVER_SOURCES := $(filter-out $(DRIVERS_DIR)/uart/uart.c,$(DRIVER_SOURCES))
+endif
+ifeq ($(ARCH),x86)
+    DRIVER_SOURCES := $(filter-out $(DRIVERS_DIR)/uart/uart.c,$(DRIVER_SOURCES))
+endif
+
+# Object files
+KERNEL_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/kernel/%.o,$(KERNEL_SOURCES_C))
+KERNEL_OBJECTS += $(patsubst $(KERNEL_DIR)/%.S,$(BUILD_DIR)/kernel/%.o,$(KERNEL_SOURCES_ASM))
+DRIVER_OBJECTS := $(patsubst $(DRIVERS_DIR)/%.c,$(BUILD_DIR)/drivers/%.o,$(DRIVER_SOURCES))
+
+ALL_OBJECTS := $(KERNEL_OBJECTS) $(DRIVER_OBJECTS)
+KERNEL_BINARY := $(BUILD_DIR)/kernel/vibos-$(ARCH).elf
+
+# ============================================================================
+# Main Targets
+# ============================================================================
+
+.PHONY: all clean kernel image qemu qemu-debug help
+
+all: kernel image
+	@echo "=========================================="
+	@echo "Vib-OS $(ARCH) build complete!"
+	@echo "=========================================="
+	@echo "Kernel: $(KERNEL_BINARY)"
+	@echo "Run 'make qemu' to test in emulator"
+
+help:
+	@echo "Vib-OS Multi-Architecture Build System"
+	@echo "======================================="
+	@echo ""
+	@echo "Usage: make [ARCH=<arch>] <target>"
+	@echo ""
+	@echo "Architectures:"
+	@echo "  arm64    - ARM64 (default, Raspberry Pi, Apple Silicon)"
+	@echo "  x86_64   - x86-64 (UEFI boot)"
+	@echo "  x86      - x86 32-bit (BIOS boot)"
+	@echo ""
+	@echo "Build targets:"
+	@echo "  all      - Build kernel and image"
+	@echo "  kernel   - Build kernel only"
+	@echo "  image    - Create bootable disk image"
+	@echo "  qemu     - Run in QEMU emulator"
+	@echo "  clean    - Remove build artifacts"
+	@echo ""
+	@echo "Examples:"
+	@echo "  make ARCH=arm64 all"
+	@echo "  make ARCH=x86_64 qemu"
+	@echo "  make ARCH=x86 kernel"
+
+# ============================================================================
+# Directory Setup
+# ============================================================================
+
+$(BUILD_DIR):
+	@mkdir -p $(BUILD_DIR)/kernel/core
+	@mkdir -p $(BUILD_DIR)/kernel/arch/$(ARCH)
+	@mkdir -p $(BUILD_DIR)/kernel/mm
+	@mkdir -p $(BUILD_DIR)/kernel/fs
+	@mkdir -p $(BUILD_DIR)/kernel/net
+	@mkdir -p $(BUILD_DIR)/kernel/sched
+	@mkdir -p $(BUILD_DIR)/kernel/syscall
+	@mkdir -p $(BUILD_DIR)/kernel/ipc
+	@mkdir -p $(BUILD_DIR)/kernel/lib
+	@mkdir -p $(BUILD_DIR)/kernel/loader
+	@mkdir -p $(BUILD_DIR)/kernel/gui
+	@mkdir -p $(BUILD_DIR)/kernel/media
+	@mkdir -p $(BUILD_DIR)/kernel/apps
+	@mkdir -p $(BUILD_DIR)/kernel/drivers
+	@mkdir -p $(BUILD_DIR)/kernel/sync
+	@mkdir -p $(BUILD_DIR)/kernel/sandbox
+	@mkdir -p $(BUILD_DIR)/drivers
+	@mkdir -p $(IMAGE_DIR)
+
+# ============================================================================
+# Kernel Build
+# ============================================================================
+
+kernel: $(BUILD_DIR) $(KERNEL_BINARY)
+	@echo "[KERNEL] $(ARCH) build complete: $(KERNEL_BINARY)"
+
+$(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.c
+	@mkdir -p $(dir $@)
+	@echo "[CC] $<"
+ifeq ($(ARCH),arm64)
+	@# Media files need FP support on ARM64
+	@if echo "$<" | grep -q "/media/"; then \
+		$(CC) $(CFLAGS_COMMON) $(CROSS_TARGET) -mcpu=cortex-a72 -I$(KERNEL_DIR)/include -I$(KERNEL_DIR) -fno-builtin -nostdlib -nostdinc -DARCH_ARM64 -c $< -o $@; \
+	else \
+		$(CC) $(CFLAGS_KERNEL) -c $< -o $@; \
+	fi
+else
+	@$(CC) $(CFLAGS_KERNEL) -c $< -o $@
+endif
+
+$(BUILD_DIR)/kernel/%.o: $(KERNEL_DIR)/%.S
+	@mkdir -p $(dir $@)
+	@echo "[AS] $<"
+	@$(AS) $(ASFLAGS) -c $< -o $@
+
+$(BUILD_DIR)/drivers/%.o: $(DRIVERS_DIR)/%.c
+	@mkdir -p $(dir $@)
+	@echo "[CC] $<"
+	@$(CC) $(CFLAGS_KERNEL) -c $< -o $@
+
+$(KERNEL_BINARY): $(ALL_OBJECTS)
+	@echo "[LD] $@"
+	@$(LD) $(LDFLAGS_KERNEL) -o $@ $^
+	@if command -v $(OBJDUMP) >/dev/null 2>&1; then \
+		$(OBJDUMP) -h $@ > $(BUILD_DIR)/kernel/sections.txt; \
+		echo "[INFO] Kernel sections written to $(BUILD_DIR)/kernel/sections.txt"; \
+	else \
+		echo "[INFO] objdump not found, skipping sections dump"; \
+	fi
+	@echo "[KERNEL] $(ARCH) build complete: $@"
+
+# ============================================================================
+# Boot Image Creation
+# ============================================================================
+
+image: kernel
+	@echo "[IMAGE] Creating $(ARCH) boot image..."
+ifeq ($(ARCH),arm64)
+	@./scripts/create-boot-image.sh $(BUILD_DIR) $(IMAGE_DIR)
+else ifeq ($(ARCH),x86_64)
+	@./scripts/create-uefi-image.sh $(BUILD_DIR) $(IMAGE_DIR)
+else ifeq ($(ARCH),x86)
+	@./scripts/create-bios-image.sh $(BUILD_DIR) $(IMAGE_DIR)
+endif
+	@echo "[IMAGE] Created: $(IMAGE_DIR)/vibos-$(ARCH).img"
+
+# ============================================================================
+# QEMU Testing
+# ============================================================================
+
+qemu: image
+	@echo "[QEMU] Starting Vib-OS $(ARCH) in emulator..."
+ifeq ($(ARCH),arm64)
+	@$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BINARY)
+else ifeq ($(ARCH),x86_64)
+	@$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BINARY)
+else ifeq ($(ARCH),x86)
+	@$(QEMU) $(QEMU_FLAGS) -drive format=raw,file=$(IMAGE_DIR)/vibos-$(ARCH).img
+endif
+
+qemu-debug: image
+	@echo "[QEMU] Starting Vib-OS $(ARCH) with GDB server on port 1234..."
+	@$(QEMU) $(QEMU_FLAGS) -kernel $(KERNEL_BINARY) -s -S
+
+# ============================================================================
+# Clean
+# ============================================================================
+
+clean:
+	@echo "[CLEAN] Removing $(ARCH) build artifacts..."
+	@rm -rf $(BUILD_DIR)
+	@echo "[CLEAN] Done"
+
+clean-all:
+	@echo "[CLEAN] Removing all build artifacts..."
+	@rm -rf $(ROOT_DIR)/build
+	@rm -rf $(IMAGE_DIR)
+	@echo "[CLEAN] Done"
