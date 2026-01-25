@@ -493,7 +493,7 @@ void term_execute_command(struct terminal *term, const char *cmd) {
     term_puts(term, "  rm <f>    - Remove file\n");
     term_puts(term, "\033[33mMedia Commands:\033[0m\n");
     term_puts(term, "  play <f>  - Play MP3 audio\n");
-    term_puts(term, "  view <f>  - View JPEG/PNG image\n");
+    term_puts(term, "  view <f>  - View JPEG image\n");
     term_puts(term, "  sound     - Test audio output\n");
     term_puts(term, "\033[33mLanguages:\033[0m\n");
     term_puts(term, "  run <f>   - Execute file (.py/.nano)\n");
@@ -667,9 +667,8 @@ void term_execute_command(struct terminal *term, const char *cmd) {
       return;
     }
 
-    if (!str_ends_with_ci(path, ".jpg") && !str_ends_with_ci(path, ".jpeg") &&
-        !str_ends_with_ci(path, ".png")) {
-      term_puts(term, "view: only .jpg/.jpeg/.png supported\n");
+    if (!str_ends_with_ci(path, ".jpg") && !str_ends_with_ci(path, ".jpeg")) {
+      term_puts(term, "view: only .jpg/.jpeg supported\n");
       return;
     }
 

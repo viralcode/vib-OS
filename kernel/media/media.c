@@ -171,7 +171,7 @@ int media_decode_jpeg_buffer(const uint8_t *data, size_t size,
         uint8_t g = info.m_pMCUBufG ? info.m_pMCUBufG[pixel_offset] : r;
         uint8_t b = info.m_pMCUBufB ? info.m_pMCUBufB[pixel_offset] : r;
         pixels[yy * info.m_width + xx] =
-            0xFF000000 | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
+            ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
       }
     }
 
@@ -255,9 +255,7 @@ void media_free_audio(media_audio_t *audio) {
 
 #include "tpng.h"
 
-int media_decode_png_buffer(const uint8_t *data, size_t size,
-                            media_image_t *out, uint32_t *buffer,
-                            size_t buffer_size) {
+int media_decode_png(const uint8_t *data, size_t size, media_image_t *out) {
   if (!data || !size || !out)
     return -EINVAL;
 
@@ -271,13 +269,6 @@ int media_decode_png_buffer(const uint8_t *data, size_t size,
     return -EINVAL;
   }
 
-  /* Check for integer overflow in pixel count calculation */
-  if ((size_t)width > SIZE_MAX / (size_t)height) {
-    printk(KERN_ERR "PNG: dimensions too large (integer overflow)\n");
-    kfree(rgba);
-    return -EINVAL;
-  }
-
   /* Check for excessively large images (16M pixels max, same as JPEG) */
   size_t pixel_count = (size_t)width * (size_t)height;
   if (pixel_count > 16 * 1024 * 1024) {
@@ -286,46 +277,20 @@ int media_decode_png_buffer(const uint8_t *data, size_t size,
     return -EINVAL;
   }
 
-  size_t required_bytes = pixel_count * sizeof(uint32_t);
-  uint32_t *pixels = NULL;
-
-  if (buffer) {
-    if (buffer_size < required_bytes) {
-      printk(KERN_ERR "PNG: buffer too small (need %d, got %d)\n",
-             (int)required_bytes, (int)buffer_size);
-      kfree(rgba);
-      return -ENOMEM;
-    }
-    pixels = buffer;
-  } else {
-    pixels = (uint32_t *)kmalloc(required_bytes, GFP_KERNEL);
-    if (!pixels) {
-      kfree(rgba);
-      return -ENOMEM;
-    }
+  /* Convert RGBA (uint8_t*) to 0x00RRGGBB (uint32_t*) format */
+  uint32_t *pixels =
+      (uint32_t *)kmalloc(pixel_count * sizeof(uint32_t), GFP_KERNEL);
+  if (!pixels) {
+    kfree(rgba);
+    return -ENOMEM;
   }
 
-  /* Convert RGBA (uint8_t*) to 0x00RRGGBB (uint32_t*) format */
-  bool any_alpha = false;
-  bool any_rgb = false;
   for (size_t i = 0; i < pixel_count; i++) {
     uint8_t r = rgba[i * 4 + 0];
     uint8_t g = rgba[i * 4 + 1];
     uint8_t b = rgba[i * 4 + 2];
-    uint8_t a = rgba[i * 4 + 3];
-    if (a != 0)
-      any_alpha = true;
-    if ((r | g | b) != 0)
-      any_rgb = true;
-    pixels[i] =
-        ((uint32_t)a << 24) | ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
-  }
-
-  /* If alpha is all zero but RGB is present, treat image as opaque. */
-  if (!any_alpha && any_rgb) {
-    for (size_t i = 0; i < pixel_count; i++) {
-      pixels[i] |= 0xFF000000;
-    }
+    /* Alpha is in rgba[i * 4 + 3] but we ignore it for now */
+    pixels[i] = ((uint32_t)r << 16) | ((uint32_t)g << 8) | b;
   }
 
   kfree(rgba);
@@ -334,8 +299,4 @@ int media_decode_png_buffer(const uint8_t *data, size_t size,
   out->height = height;
   out->pixels = pixels;
   return 0;
-}
-
-int media_decode_png(const uint8_t *data, size_t size, media_image_t *out) {
-  return media_decode_png_buffer(data, size, out, NULL, 0);
 }

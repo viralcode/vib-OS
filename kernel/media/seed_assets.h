@@ -21,8 +21,6 @@ extern const unsigned int bootstrap_square_jpg_len;
 
 extern const unsigned char bootstrap_wallpaper_jpg[];
 extern const unsigned int bootstrap_wallpaper_jpg_len;
-extern const unsigned char bootstrap_wallpaper_png[];
-extern const unsigned int bootstrap_wallpaper_png_len;
 
 /* Real photos from the internet */
 extern const unsigned char bootstrap_nature_jpg[];

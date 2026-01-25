@@ -236,13 +236,12 @@ graph TD
 - **PCM Playback**: 16-bit stereo audio support
 - **MP3 Decoder**: minimp3 library integration for MP3 playback
 - **JPEG Decoder**: picojpeg library for image viewing
-- **PNG Decoder**: tPNG library for image viewing
 - **Media Pipeline**: Load and decode media files from VFS
 
 ### 📦 Applications
 - **Terminal**: `ls`, `cd`, `help`, `clear`, `cat`, `echo`, `play`, `view`, `python`, `nano` commands
 - **Notepad**: Text editor with save/load functionality backed by VFS
-- **Image Viewer**: JPEG/PNG image viewer with zoom, rotate, and pan support
+- **Image Viewer**: JPEG image viewer with zoom, rotate, and pan support
 - **Audio Player**: MP3 playback support via minimp3 decoder
 - **Process Manager**: View running processes (PID, name, state) with kill button
 - **Snake**: Classic game with graphics and score tracking
@@ -432,7 +431,7 @@ Use UTM (https://mac.getutm.app/):
 - [ ] **USB Support**: Add USB mass storage and HID drivers
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
-- [x] ~~**PNG Support**: Add PNG image decoder~~ *(Done)*
+- [ ] **PNG Support**: Add PNG image decoder
 - [ ] **Video Player**: Basic video playback support
 
 ## 🤝 Contributing
@@ -469,7 +468,6 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **DOOM**: id Software for the original Doom engine
 - **minimp3**: lieff for the MP3 decoder library
 - **picojpeg**: Rich Geldreich for the JPEG decoder
-- **tPNG**: Johnathan Corkery for the minimal PNG decoder
 - **Nano Language**: [Jordan Hubbard](https://github.com/jordanhubbard/nanolang) for the Nano scripting language
 - **QEMU**: The QEMU team for the excellent emulator
 - **OSDev Community**: For invaluable resources and documentation

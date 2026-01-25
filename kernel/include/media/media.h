@@ -6,7 +6,7 @@
 typedef struct {
   uint32_t width;
   uint32_t height;
-  uint32_t *pixels; /* 0xAARRGGBB */
+  uint32_t *pixels; /* 0x00RRGGBB */
 } media_image_t;
 
 typedef struct {
@@ -29,8 +29,5 @@ int media_decode_mp3(const uint8_t *data, size_t size, media_audio_t *out);
 void media_free_audio(media_audio_t *audio);
 
 int media_decode_png(const uint8_t *data, size_t size, media_image_t *out);
-int media_decode_png_buffer(const uint8_t *data, size_t size,
-                            media_image_t *out, uint32_t *buffer,
-                            size_t buffer_size);
 
 #endif /* _KERNEL_MEDIA_H */
