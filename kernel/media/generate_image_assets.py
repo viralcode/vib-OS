@@ -34,6 +34,7 @@ def main():
         ("portrait.jpg", "bootstrap_portrait_jpg"),
         ("square.jpg", "bootstrap_square_jpg"),
         ("wallpaper.jpg", "bootstrap_wallpaper_jpg"),
+        ("wallpaper.png", "bootstrap_wallpaper_png"),
         ("nature.jpg", "bootstrap_nature_jpg"),
         ("city.jpg", "bootstrap_city_jpg"),
         ("httpbin.jpg", "bootstrap_httpbin_jpg"),

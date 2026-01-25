@@ -25,14 +25,14 @@ Vib-OS v2.2.0 - Multi-Architecture OS with Full GUI
 
 ## Overview
 
-Vib-OS is a from-scratch, Unix-like operating system with **full multi-architecture support** for **ARM64** and **x86_64**. It features a custom kernel, a modern macOS-inspired graphical user interface, a full TCP/IP networking stack, and a Virtual File System (VFS). Built with **25,000+ lines** of C and Assembly, it runs natively on QEMU, real hardware (Raspberry Pi 4/5, x86_64 PCs), and Apple Silicon.
+Vib-OS is a from-scratch, Unix-like operating system with **full multi-architecture support** for **ARM64** and **x86_64**. It features a custom kernel, a modern macOS-inspired graphical user interface, a full TCP/IP networking stack, and a Virtual File System (VFS). Built with **25,000+ lines** of C and Assembly, it runs natively on QEMU, real hardware (Raspberry Pi 4/5, x86_64 PCs), and Apple Silicon (via UTM).
 
 ## 🎯 Multi-Architecture Support
 
 | Architecture | Boot Method | Status | Hardware |
 |--------------|-------------|--------|----------|
-| **ARM64** | Direct / UEFI | ✅| Raspberry Pi 4/5, QEMU virt, Apple Silicon (VM) |
-| **x86_64** | Direct / UEFI / BIOS | ✅  will be released soon. | Modern PCs, QEMU, VirtualBox, VMware |
+| **ARM64** | Direct / UEFI | ✅ **Production Ready** | Raspberry Pi 4/5, QEMU virt, Apple Silicon (VM) |
+| **x86_64** | Direct / UEFI / BIOS | ✅ **Production Ready** | Modern PCs, QEMU, VirtualBox, VMware |
 | **x86** | Direct / BIOS (MBR) | ✅ **Builds Successfully** | Legacy PCs, QEMU pc |
 
 ### What Works Now
@@ -236,12 +236,13 @@ graph TD
 - **PCM Playback**: 16-bit stereo audio support
 - **MP3 Decoder**: minimp3 library integration for MP3 playback
 - **JPEG Decoder**: picojpeg library for image viewing
+- **PNG Decoder**: tPNG library for image viewing
 - **Media Pipeline**: Load and decode media files from VFS
 
 ### 📦 Applications
 - **Terminal**: `ls`, `cd`, `help`, `clear`, `cat`, `echo`, `play`, `view`, `python`, `nano` commands
 - **Notepad**: Text editor with save/load functionality backed by VFS
-- **Image Viewer**: JPEG image viewer with zoom, rotate, and pan support
+- **Image Viewer**: JPEG/PNG image viewer with zoom, rotate, and pan support
 - **Audio Player**: MP3 playback support via minimp3 decoder
 - **Process Manager**: View running processes (PID, name, state) with kill button
 - **Snake**: Classic game with graphics and score tracking
@@ -298,7 +299,8 @@ make qemu
 
 ```bash
 # Build for x86_64
-
+make -f Makefile.multiarch ARCH=x86_64 clean
+make -f Makefile.multiarch ARCH=x86_64 kernel
 
 # Test in QEMU
 make -f Makefile.multiarch ARCH=x86_64 qemu
@@ -344,7 +346,19 @@ sudo dd if=image/unixos.img of=/dev/sdX bs=4M status=progress && sync
 
 ### For x86_64 PC
 
+```bash
+# Create UEFI bootable image
+./scripts/create-uefi-image.sh
 
+# Create BIOS bootable image
+./scripts/create-bios-image.sh
+
+# Create bootable ISO
+./scripts/create-iso.sh
+
+# Write to USB drive
+sudo dd if=vibos-uefi.img of=/dev/sdX bs=4M status=progress && sync
+```
 
 ## 🧪 Testing
 
@@ -378,7 +392,11 @@ make -f Makefile.multiarch ARCH=x86_64 qemu
 
 ### Apple Silicon (M1/M2/M3/M4)
 
-Use Qemu. 
+Use UTM (https://mac.getutm.app/):
+1. Create new ARM64 virtual machine
+2. Use `image/unixos.img` as boot disk
+3. Configure 2GB+ RAM
+4. Start VM
 
 ## 🚧 Current Status & Known Issues
 
@@ -414,7 +432,7 @@ Use Qemu.
 - [ ] **USB Support**: Add USB mass storage and HID drivers
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
-- [ ] **PNG Support**: Add PNG image decoder
+- [x] ~~**PNG Support**: Add PNG image decoder~~ *(Done)*
 - [ ] **Video Player**: Basic video playback support
 
 ## 🤝 Contributing
@@ -451,6 +469,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 - **DOOM**: id Software for the original Doom engine
 - **minimp3**: lieff for the MP3 decoder library
 - **picojpeg**: Rich Geldreich for the JPEG decoder
+- **tPNG**: Johnathan Corkery for the minimal PNG decoder
 - **Nano Language**: [Jordan Hubbard](https://github.com/jordanhubbard/nanolang) for the Nano scripting language
 - **QEMU**: The QEMU team for the excellent emulator
 - **OSDev Community**: For invaluable resources and documentation

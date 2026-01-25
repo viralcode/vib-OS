@@ -28,6 +28,8 @@ extern char term_get_input_char(struct terminal *t, int idx);
 extern void term_render(struct terminal *term);
 extern void term_set_content_pos(struct terminal *t, int x, int y);
 
+static inline uint32_t blend_pixel_over(uint32_t src, uint32_t dst);
+
 /* ===================================================================== */
 /* Display and Color */
 /* ===================================================================== */
@@ -76,7 +78,7 @@ static int current_wallpaper = 0; /* 0 = Landscape (default image) */
 /* Wallpaper types: 0 = gradient, 1 = image */
 /* Wallpaper types: 0 = gradient, 1 = image */
 static struct {
-  int type;           /* 0 = gradient, 1 = JPEG image */
+  int type;           /* 0 = gradient, 1 = JPEG/PNG image */
   uint8_t tr, tg, tb; /* Gradient: Top color */
   uint8_t br, bg, bb; /* Gradient: Bottom color */
   const char *name;   /* Display name */
@@ -86,7 +88,7 @@ static struct {
     {1, 0, 0, 0, 0, 0, 0, "Nature", "/Pictures/nature.jpg"},
     {1, 0, 0, 0, 0, 0, 0, "City", "/Pictures/city.jpg"},
     {1, 0, 0, 0, 0, 0, 0, "Portrait", "/Pictures/portrait.jpg"},
-    {1, 0, 0, 0, 0, 0, 0, "Wallpaper", "/Pictures/wallpaper.jpg"},
+    {1, 0, 0, 0, 0, 0, 0, "Wallpaper", "/Pictures/wallpaper.png"},
     {0, 30, 27, 75, 15, 27, 62, "Indigo Night", NULL},
     {0, 20, 60, 100, 10, 30, 60, "Ocean Blue", NULL},
     {0, 60, 20, 60, 30, 15, 45, "Purple Haze", NULL},
@@ -112,7 +114,12 @@ static void load_thumbnails(void) {
       uint8_t *data = NULL;
       size_t size = 0;
       if (media_load_file(wallpapers[i].path, &data, &size) == 0) {
-        media_decode_jpeg(data, size, &thumbnail_cache[i]);
+        if (size >= 4 && data[0] == 0x89 && data[1] == 'P' &&
+            data[2] == 'N' && data[3] == 'G') {
+          media_decode_png(data, size, &thumbnail_cache[i]);
+        } else {
+          media_decode_jpeg(data, size, &thumbnail_cache[i]);
+        }
         media_free_file(data);
       }
     }
@@ -142,8 +149,18 @@ static void wallpaper_ensure_loaded(void) {
   size_t size = 0;
 
   if (media_load_file(path, &data, &size) == 0) {
-    if (media_decode_jpeg_buffer(data, size, &wallpaper_image, wallpaper_buffer,
-                                 sizeof(wallpaper_buffer)) == 0) {
+    int ret = -1;
+    if (size >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
+        data[3] == 'G') {
+      ret = media_decode_png_buffer(data, size, &wallpaper_image,
+                                    wallpaper_buffer, sizeof(wallpaper_buffer));
+    } else {
+      ret = media_decode_jpeg_buffer(data, size, &wallpaper_image,
+                                     wallpaper_buffer,
+                                     sizeof(wallpaper_buffer));
+    }
+
+    if (ret == 0) {
       wallpaper_loaded = current_wallpaper;
     } else {
       /* Fallback to gradient if decode fails */
@@ -161,6 +178,21 @@ static void wallpaper_ensure_loaded(void) {
 static uint32_t wallpaper_get_pixel(int x, int y, int height) {
   int idx = current_wallpaper;
 
+  /* Gradient fallback/background */
+  int progress = (y * 256) / height;
+  if (progress < 0)
+    progress = 0;
+  if (progress > 255)
+    progress = 255;
+
+  uint8_t gr = wallpapers[idx].tr +
+               ((wallpapers[idx].br - wallpapers[idx].tr) * progress) / 256;
+  uint8_t gg = wallpapers[idx].tg +
+               ((wallpapers[idx].bg - wallpapers[idx].tg) * progress) / 256;
+  uint8_t gb = wallpapers[idx].tb +
+               ((wallpapers[idx].bb - wallpapers[idx].tb) * progress) / 256;
+  uint32_t gradient = (gr << 16) | (gg << 8) | gb;
+
   /* Image wallpaper */
   if (wallpapers[idx].type == 1 && wallpaper_image.pixels) {
     /* Scale image to fit screen */
@@ -168,25 +200,14 @@ static uint32_t wallpaper_get_pixel(int x, int y, int height) {
     int img_y = (y * wallpaper_image.height) / height;
     if (img_x >= 0 && img_x < (int)wallpaper_image.width && img_y >= 0 &&
         img_y < (int)wallpaper_image.height) {
-      return wallpaper_image.pixels[img_y * wallpaper_image.width + img_x];
+      uint32_t pixel = wallpaper_image.pixels[img_y * wallpaper_image.width +
+                                              img_x];
+      return blend_pixel_over(pixel, gradient);
     }
   }
 
   /* Gradient fallback */
-  int progress = (y * 256) / height;
-  if (progress < 0)
-    progress = 0;
-  if (progress > 255)
-    progress = 255;
-
-  uint8_t r = wallpapers[idx].tr +
-              ((wallpapers[idx].br - wallpapers[idx].tr) * progress) / 256;
-  uint8_t g = wallpapers[idx].tg +
-              ((wallpapers[idx].bg - wallpapers[idx].tg) * progress) / 256;
-  uint8_t b = wallpapers[idx].tb +
-              ((wallpapers[idx].bb - wallpapers[idx].tb) * progress) / 256;
-
-  return (r << 16) | (g << 8) | b;
+  return gradient;
 }
 
 /* Calculator state (global for click handling) */
@@ -527,6 +548,28 @@ static struct display primary_display = {0};
 /* ===================================================================== */
 /* Basic Drawing Functions */
 /* ===================================================================== */
+
+static inline uint32_t blend_pixel_over(uint32_t src, uint32_t dst) {
+  uint32_t a = src >> 24;
+  if (a >= 255)
+    return src & 0x00FFFFFF;
+  if (a == 0)
+    return dst & 0x00FFFFFF;
+
+  uint32_t sr = (src >> 16) & 0xFF;
+  uint32_t sg = (src >> 8) & 0xFF;
+  uint32_t sb = src & 0xFF;
+  uint32_t dr = (dst >> 16) & 0xFF;
+  uint32_t dg = (dst >> 8) & 0xFF;
+  uint32_t db = dst & 0xFF;
+  uint32_t inv = 255 - a;
+
+  uint32_t r = (sr * a + dr * inv + 127) / 255;
+  uint32_t g = (sg * a + dg * inv + 127) / 255;
+  uint32_t b = (sb * a + db * inv + 127) / 255;
+
+  return (r << 16) | (g << 8) | b;
+}
 
 static inline void draw_pixel(int x, int y, uint32_t color) {
   if (x < 0 || x >= (int)primary_display.width)
@@ -1391,7 +1434,8 @@ static void draw_image_viewer(struct window *win, int content_x, int content_y,
     for (int x = 0; x < draw_w; x++) {
       int src_x = (x * img_w) / draw_w;
       uint32_t color = st->image.pixels[src_y * img_w + src_x];
-      draw_pixel(offset_x + x, offset_y + y, color);
+      uint32_t out = blend_pixel_over(color, THEME_BG);
+      draw_pixel(offset_x + x, offset_y + y, out);
     }
   }
 }
@@ -1476,7 +1520,7 @@ void gui_open_image_viewer(const char *path) {
   /* Known image files in Pictures folder */
   static const char *pictures_files[] = {
       "test.png",      "pig.jpg",    "city.jpg",     "nature.jpg",
-      "wallpaper.jpg", "square.jpg", "portrait.jpg", "landscape.jpg"};
+      "wallpaper.png", "square.jpg", "portrait.jpg", "landscape.jpg"};
   int num_pictures = sizeof(pictures_files) / sizeof(pictures_files[0]);
 
   /* Check if we're in Pictures folder */
@@ -2425,7 +2469,8 @@ static void draw_window(struct window *win) {
                   src_y < (int)thumb_img->height) {
                 uint32_t pixel =
                     thumb_img->pixels[src_y * thumb_img->width + src_x];
-                draw_pixel(tx + px, ty + py, pixel);
+                uint32_t out = blend_pixel_over(pixel, THEME_BG);
+                draw_pixel(tx + px, ty + py, out);
               }
             }
           }
@@ -2954,9 +2999,9 @@ static void draw_dock(void) {
             sy = DOCK_ICON_BITMAP_SIZE - 1;
 
           uint32_t px = icon_data[sy * DOCK_ICON_BITMAP_SIZE + sx];
-          if ((px >> 24) > 128) {
-            draw_pixel(draw_x + offset + dx, draw_y + offset + dy,
-                       px & 0xFFFFFF);
+          if ((px >> 24) != 0) {
+            uint32_t out = blend_pixel_over(px, bg_color);
+            draw_pixel(draw_x + offset + dx, draw_y + offset + dy, out);
           }
         }
       }
@@ -4614,7 +4659,8 @@ static void image_viewer_on_draw(struct window *win) {
 
       if (src_x >= 0 && src_x < orig_w && src_y >= 0 && src_y < orig_h) {
         uint32_t pixel = g_imgview.image.pixels[src_y * orig_w + src_x];
-        draw_pixel(screen_x, screen_y, pixel);
+        uint32_t out = blend_pixel_over(pixel, bg_color);
+        draw_pixel(screen_x, screen_y, out);
       }
     }
   }
@@ -4709,12 +4755,9 @@ static void image_viewer_on_draw(struct window *win) {
     for (int iy = 0; iy < TOOLBAR_ICON_SIZE; iy++) {
       for (int ix = 0; ix < TOOLBAR_ICON_SIZE; ix++) {
         uint32_t pixel = icon_data[iy * TOOLBAR_ICON_SIZE + ix];
-        uint8_t alpha = (pixel >> 24) & 0xFF;
-        if (alpha > 0) {
-          /* Simple alpha blending: if alpha > 128, draw white */
-          if (alpha > 128) {
-            draw_pixel(icon_x + ix, icon_y + iy, icon_color);
-          }
+        if ((pixel >> 24) != 0) {
+          uint32_t out = blend_pixel_over(pixel, bg);
+          draw_pixel(icon_x + ix, icon_y + iy, out);
         }
       }
     }
