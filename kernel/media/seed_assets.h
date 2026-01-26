@@ -9,6 +9,9 @@ extern const unsigned int vib_seed_mp3_len;
 extern const uint8_t vib_seed_jpg[];
 extern const unsigned int vib_seed_jpg_len;
 
+extern const uint8_t vib_seed_demo_avi[];
+extern const unsigned int vib_seed_demo_avi_len;
+
 /* Bootstrap images */
 extern const unsigned char bootstrap_landscape_jpg[];
 extern const unsigned int bootstrap_landscape_jpg_len;

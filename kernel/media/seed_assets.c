@@ -16,4 +16,10 @@
 #undef _tmp_vibos_seed_jpg
 #undef _tmp_vibos_seed_jpg_len
 
+#define _tmp_vibos_demo_avi vib_seed_demo_avi
+#define _tmp_vibos_demo_avi_len vib_seed_demo_avi_len
+#include "demo_avi.inc"
+#undef _tmp_vibos_demo_avi
+#undef _tmp_vibos_demo_avi_len
+
 /* Bootstrap images are compiled separately as .c files */

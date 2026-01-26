@@ -8,8 +8,10 @@
 #include "arch/arch.h"
 #include "drivers/pci.h"
 #include "drivers/uart.h"
+#include "drivers/virtio_9p.h"
 #include "fs/vfs.h"
 #include "media/seed_assets.h"
+#include "mm/kmalloc.h"
 #include "mm/pmm.h"
 #include "mm/vmm.h"
 #include "printk.h"
@@ -31,6 +33,336 @@ extern char __bss_end[];
 static void print_banner(void);
 static void init_subsystems(void *dtb);
 static void start_init_process(void);
+
+/* RamFS helper APIs (ramfs.c) */
+extern int ramfs_create_file_bytes(const char *path, mode_t mode,
+                                   const uint8_t *data, size_t size);
+extern int ramfs_create_file(const char *path, mode_t mode, const char *content);
+
+static int str_ends_with_ci(const char *name, const char *ext) {
+  if (!name || !ext)
+    return 0;
+  int nlen = 0;
+  int elen = 0;
+  while (name[nlen])
+    nlen++;
+  while (ext[elen])
+    elen++;
+  if (elen == 0 || nlen < elen)
+    return 0;
+  for (int i = 0; i < elen; i++) {
+    char a = name[nlen - elen + i];
+    char b = ext[i];
+    if (a >= 'A' && a <= 'Z')
+      a = (char)(a + 32);
+    if (b >= 'A' && b <= 'Z')
+      b = (char)(b + 32);
+    if (a != b)
+      return 0;
+  }
+  return 1;
+}
+
+static int str_starts_with(const char *s, const char *prefix) {
+  if (!s || !prefix)
+    return 0;
+  for (int i = 0; prefix[i]; i++) {
+    if (!s[i])
+      return 0;
+    if (s[i] != prefix[i])
+      return 0;
+  }
+  return 1;
+}
+
+static int vfs_path_exists(const char *path) {
+  struct file *f = vfs_open(path, O_RDONLY, 0);
+  if (f) {
+    vfs_close(f);
+    return 1;
+  }
+  return 0;
+}
+
+static void import_hostshare_videos(void) {
+  /* Always rewrite a status file to avoid stale info across builds. */
+  ramfs_create_file("/Videos/HOSTSHARE.txt", 0644,
+                    "Hostshare: probing...\n");
+
+  /* Hostshare is an optional QEMU dev feature; no-op if absent. */
+  if (virtio_9p_init() != 0) {
+    printk(KERN_INFO "Hostshare: virtio-9p not available\n");
+    ramfs_create_file(
+        "/Videos/HOSTSHARE.txt", 0644,
+        "Hostshare not available.\n\n"
+        "This feature requires running Vib-OS via:\n"
+        "  make run-gui\n"
+        "or\n"
+        "  make run-gpu\n\n"
+        "and placing files on the host in:\n"
+        "  hostshare/Videos/\n\n"
+        "Note: Vib-OS video playback supports MJPEG AVI only.\n");
+    return;
+  }
+
+  /* Optional: import a small test file for quick sanity checks */
+  {
+    uint8_t *tdata = NULL;
+    size_t tsz = 0;
+    if (virtio_9p_read_file("Videos/test.txt", &tdata, &tsz, 64 * 1024) == 0 &&
+        tdata && tsz > 0) {
+      const char *dst = "/Videos/test.txt";
+      if (vfs_path_exists(dst)) {
+        dst = "/Videos/host_test.txt";
+      }
+      ramfs_create_file_bytes(dst, 0644, tdata, tsz);
+      kfree(tdata);
+    } else if (tdata) {
+      kfree(tdata);
+    }
+  }
+
+  /* Report mount tag */
+  {
+    const char *tag = virtio_9p_get_tag();
+    if (tag && tag[0]) {
+      char msg[128];
+      int p = 0;
+      const char *a = "Hostshare tag: ";
+      for (int i = 0; a[i] && p < 127; i++)
+        msg[p++] = a[i];
+      for (int i = 0; tag[i] && p < 127; i++)
+        msg[p++] = tag[i];
+      msg[p++] = '\n';
+      msg[p] = '\0';
+      ramfs_create_file("/Videos/HOSTSHARE_TAG.txt", 0644, msg);
+    }
+  }
+
+  uint8_t *list = NULL;
+  size_t list_sz = 0;
+  if (virtio_9p_read_file("Videos/videos.txt", &list, &list_sz, 64 * 1024) !=
+      0) {
+    printk(KERN_INFO "Hostshare: no Videos/videos.txt\n");
+    ramfs_create_file(
+        "/Videos/HOSTSHARE.txt", 0644,
+        "Hostshare is available, but no playlist was found.\n\n"
+        "Create this file on the host:\n"
+        "  hostshare/Videos/videos.txt\n\n"
+        "Put MJPEG AVI files in:\n"
+        "  hostshare/Videos/\n\n"
+        "Then list them in videos.txt, one per line, like:\n"
+        "  Videos/myclip.avi\n");
+    return;
+  }
+
+  /* Save playlist into RamFS for debugging. */
+  {
+    size_t cap = (list_sz < 32768) ? list_sz : 32768;
+    char *tmp = (char *)kmalloc(cap + 1, GFP_KERNEL);
+    if (tmp) {
+      for (size_t i = 0; i < cap; i++) {
+        char c = (char)list[i];
+        if (c == '\0')
+          c = ' ';
+        tmp[i] = c;
+      }
+      tmp[cap] = '\0';
+      ramfs_create_file("/Videos/HOSTSHARE_VIDEOS.txt", 0644, tmp);
+      kfree(tmp);
+    }
+  }
+
+  int imported = 0;
+  int attempted = 0;
+  int failed = 0;
+  int line_len = 0;
+  char line[128];
+
+  for (size_t i = 0; i <= list_sz; i++) {
+    char c = (i < list_sz) ? (char)list[i] : '\n';
+    if (c == '\r')
+      continue;
+    if (c != '\n') {
+      if (line_len < (int)sizeof(line) - 1)
+        line[line_len++] = c;
+      continue;
+    }
+
+    line[line_len] = '\0';
+    line_len = 0;
+
+    /* Trim leading spaces */
+    int s = 0;
+    while (line[s] == ' ' || line[s] == '\t')
+      s++;
+    if (line[s] == '\0' || line[s] == '#')
+      continue;
+
+    /* Trim trailing spaces */
+    int e = s;
+    while (line[e])
+      e++;
+    while (e > s && (line[e - 1] == ' ' || line[e - 1] == '\t'))
+      e--;
+    line[e] = '\0';
+
+    const char *src = line + s;
+    if (!str_ends_with_ci(src, ".avi"))
+      continue;
+    attempted++;
+
+    /* Destination name: /Videos/<basename> (avoid collisions)
+     *
+     * If the source is a host-converted MJPEG output:
+     *   Videos/_mjpg/<name>_mjpg.avi
+     * then import it as:
+     *   /Videos/<name>.avi
+     * so it looks like the original file inside Vib-OS. */
+    const char *base = src;
+    for (const char *p = src; *p; p++)
+      if (*p == '/')
+        base = p + 1;
+    if (*base == '\0')
+      continue;
+
+    char fixed_base[128];
+    const char *use_base = base;
+    if (str_starts_with(src, "Videos/_mjpg/") &&
+        str_ends_with_ci(base, "_mjpg.avi")) {
+      int blen = 0;
+      while (base[blen] && blen < (int)sizeof(fixed_base) - 1)
+        blen++;
+      /* strip "_mjpg.avi" (9 chars) then add ".avi" */
+      if (blen > 9) {
+        int keep = blen - 9;
+        if (keep + 4 < (int)sizeof(fixed_base)) {
+          int bi = 0;
+          for (; bi < keep; bi++)
+            fixed_base[bi] = base[bi];
+          fixed_base[bi++] = '.';
+          fixed_base[bi++] = 'a';
+          fixed_base[bi++] = 'v';
+          fixed_base[bi++] = 'i';
+          fixed_base[bi] = '\0';
+          use_base = fixed_base;
+        }
+      }
+    }
+
+    char dst[256];
+    int di = 0;
+    const char *prefix = "/Videos/";
+    for (int j = 0; prefix[j] && di < (int)sizeof(dst) - 1; j++)
+      dst[di++] = prefix[j];
+
+    /* Copy basename */
+    int bi = 0;
+    while (use_base[bi] && di < (int)sizeof(dst) - 1) {
+      dst[di++] = use_base[bi++];
+    }
+    dst[di] = '\0';
+
+    if (vfs_path_exists(dst)) {
+      /* prefix with host_ */
+      di = 0;
+      for (int j = 0; prefix[j] && di < (int)sizeof(dst) - 1; j++)
+        dst[di++] = prefix[j];
+      const char *hp = "host_";
+      for (int j = 0; hp[j] && di < (int)sizeof(dst) - 1; j++)
+        dst[di++] = hp[j];
+      bi = 0;
+      while (use_base[bi] && di < (int)sizeof(dst) - 1) {
+        dst[di++] = use_base[bi++];
+      }
+      dst[di] = '\0';
+    }
+
+    uint8_t *data = NULL;
+    size_t sz = 0;
+    if (virtio_9p_read_file(src, &data, &sz, 64u * 1024u * 1024u) != 0) {
+      printk(KERN_WARNING "Hostshare: failed to read %s\n", src);
+      failed++;
+      continue;
+    }
+
+    if (sz == 0) {
+      kfree(data);
+      continue;
+    }
+
+    int rc = ramfs_create_file_bytes(dst, 0644, data, sz);
+    kfree(data);
+    if (rc == 0) {
+      imported++;
+    } else {
+      failed++;
+    }
+
+    if (imported >= 10) {
+      printk(KERN_INFO "Hostshare: import limit reached\n");
+      break;
+    }
+  }
+
+  kfree(list);
+  printk(KERN_INFO "Hostshare: imported %d video(s) into /Videos\n", imported);
+  {
+    char msg[256];
+    int pos = 0;
+    const char *p1 = "Hostshare OK.\n";
+    for (int i = 0; p1[i] && pos < 255; i++)
+      msg[pos++] = p1[i];
+    const char *p2 = "Imported videos: ";
+    for (int i = 0; p2[i] && pos < 255; i++)
+      msg[pos++] = p2[i];
+    /* crude decimal */
+    int n = imported;
+    char tmp[16];
+    int ti = 0;
+    if (n == 0)
+      tmp[ti++] = '0';
+    while (n > 0 && ti < 15) {
+      tmp[ti++] = (char)('0' + (n % 10));
+      n /= 10;
+    }
+    for (int i = ti - 1; i >= 0 && pos < 255; i--)
+      msg[pos++] = tmp[i];
+    msg[pos++] = '\n';
+
+    const char *p3 = "Playlist entries: ";
+    for (int i = 0; p3[i] && pos < 255; i++)
+      msg[pos++] = p3[i];
+    n = attempted;
+    ti = 0;
+    if (n == 0)
+      tmp[ti++] = '0';
+    while (n > 0 && ti < 15) {
+      tmp[ti++] = (char)('0' + (n % 10));
+      n /= 10;
+    }
+    for (int i = ti - 1; i >= 0 && pos < 255; i--)
+      msg[pos++] = tmp[i];
+    msg[pos++] = '\n';
+
+    const char *p4 = "Failed imports: ";
+    for (int i = 0; p4[i] && pos < 255; i++)
+      msg[pos++] = p4[i];
+    n = failed;
+    ti = 0;
+    if (n == 0)
+      tmp[ti++] = '0';
+    while (n > 0 && ti < 15) {
+      tmp[ti++] = (char)('0' + (n % 10));
+      n /= 10;
+    }
+    for (int i = ti - 1; i >= 0 && pos < 255; i--)
+      msg[pos++] = tmp[i];
+    msg[pos++] = '\n';
+    msg[pos] = '\0';
+    ramfs_create_file("/Videos/HOSTSHARE.txt", 0644, msg);
+  }
+}
 
 /*
  * kernel_main - Main kernel entry point
@@ -181,6 +513,8 @@ static void init_subsystems(void *dtb) {
   ramfs_create_dir("Documents", 0755);
   ramfs_create_dir("Downloads", 0755);
   ramfs_create_dir("Pictures", 0755);
+  ramfs_create_dir("Videos", 0755);
+  ramfs_create_dir("Host", 0755);
   ramfs_create_dir("System", 0755);
   ramfs_create_dir("Desktop", 0755);
 
@@ -194,12 +528,40 @@ static void init_subsystems(void *dtb) {
 
   /* Create a subfolder on Desktop */
   extern int vfs_mkdir(const char *path, mode_t mode);
+  vfs_mkdir("/Videos/Host", 0755);
   vfs_mkdir("/Desktop/Projects", 0755);
   ramfs_create_file("readme.txt", 0644,
                     "Welcome to Vib-OS!\nThis is a real file in RamFS.");
   ramfs_create_file("todo.txt", 0644,
                     "- Implement Browser\n- Fix Bugs\n- Sleep");
   ramfs_create_file_bytes("sample.mp3", 0644, vib_seed_mp3, vib_seed_mp3_len);
+  ramfs_create_file(
+      "Videos/README.txt", 0644,
+      "Vib-OS Video Player (MJPEG AVI)\n\n"
+      "Vib-OS currently plays MJPEG-in-AVI (video only).\n\n"
+      "Quick test:\n"
+      "  /Videos/demo.avi\n\n"
+      "Hostshare (QEMU virtio-9p):\n"
+      "  /Videos/Host/  (hostshare/Videos)\n"
+      "  /Host/         (hostshare root)\n\n"
+      "Drop AVI files into hostshare/Videos/ on the host, then run:\n"
+      "  make run-gui\n"
+      "or\n"
+      "  make run-gpu\n\n"
+      "Non-MJPEG AVIs will be auto-converted to MJPEG on the host, and imported\n"
+      "into /Videos/ under their original names.\n\n"
+      "Controls:\n"
+      "  Space / P  - Play/Pause\n"
+      "  [ / ]      - Seek -/+ 5 seconds\n"
+      "  B / N      - Seek -/+ 1 second\n"
+      "  F          - Fullscreen (ESC to exit)\n");
+
+  /* Seed a small MJPEG demo AVI for first boot */
+  ramfs_create_file_bytes("Videos/demo.avi", 0644, vib_seed_demo_avi,
+                          vib_seed_demo_avi_len);
+
+  /* Import additional videos from the hostshare (QEMU virtio-9p) if present. */
+  import_hostshare_videos();
 
   /* Add baseline JPEG images to Pictures directory */
   extern const unsigned char bootstrap_landscape_jpg[];

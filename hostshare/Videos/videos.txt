@@ -1,0 +1,11 @@
+# Auto-generated playlist for vib-OS (virtio-9p hostshare)
+#
+# Drop AVI files into hostshare/Videos/ and (re)run make run-gui/run-gpu.
+# vib-OS currently plays MJPEG-in-AVI; non-MJPEG AVIs will be converted
+# to MJPEG into: hostshare/Videos/_mjpg/
+#
+Videos/_mjpg/bird_mjpg.avi
+Videos/_mjpg/drop_mjpg.avi
+Videos/_mjpg/file_example_AVI_1280_1_5MG_mjpg.avi
+Videos/_mjpg/file_example_AVI_1920_2_3MG_mjpg.avi
+Videos/_mjpg/flame_mjpg.avi
