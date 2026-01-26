@@ -81,6 +81,11 @@ QEMU_FLAGS := -M $(QEMU_MACHINE) -cpu $(QEMU_CPU) -m $(QEMU_MEMORY) \
               -drive if=none,id=hd0,format=raw,file=$(IMAGE_DIR)/unixos.img \
               -device virtio-blk-device,drive=hd0
 
+# Host shared folder (QEMU virtio-9p). Place files in ./hostshare on the host.
+HOSTSHARE_DIR ?= $(ROOT_DIR)/hostshare
+QEMU_HOSTSHARE_FLAGS := -fsdev local,id=fsdev0,path=$(HOSTSHARE_DIR),security_model=none,readonly=on \
+                        -device virtio-9p-device,fsdev=fsdev0,mount_tag=hostshare
+
 # ============================================================================
 # Main Targets
 # ============================================================================
@@ -288,12 +293,14 @@ run: kernel
 
 run-gui: kernel
 	@echo "[RUN] Starting Vib-OS with GUI display..."
+	@bash ./scripts/hostshare-sync-videos.sh "$(HOSTSHARE_DIR)" || true
 	@qemu-system-aarch64 -M virt,gic-version=3 \
 		-cpu max -m 512M \
 		-global virtio-mmio.force-legacy=false \
 		-device ramfb \
 		-device virtio-keyboard-device \
 		-device virtio-tablet-device \
+		$(QEMU_HOSTSHARE_FLAGS) \
 		-device virtio-net-device,netdev=net0 \
 		-netdev user,id=net0 \
 		-audiodev coreaudio,id=snd0 \
@@ -303,6 +310,7 @@ run-gui: kernel
 
 run-gpu: kernel
 	@echo "[RUN] Starting Vib-OS with virtio-GPU acceleration..."
+	@bash ./scripts/hostshare-sync-videos.sh "$(HOSTSHARE_DIR)" || true
 	@qemu-system-aarch64 -M virt,gic-version=3 \
 		-cpu max -m 512M \
 		-global virtio-mmio.force-legacy=false \
@@ -310,6 +318,7 @@ run-gpu: kernel
 		-device virtio-gpu-pci \
 		-device virtio-keyboard-device \
 		-device virtio-tablet-device \
+		$(QEMU_HOSTSHARE_FLAGS) \
 		-device virtio-net-device,netdev=net0 \
 		-netdev user,id=net0 \
 		-audiodev coreaudio,id=snd0 \

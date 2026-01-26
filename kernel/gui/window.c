@@ -5,10 +5,13 @@
  */
 
 #include "../core/process.h" /* For Doom launch */
+#include "arch/arch.h"
 #include "desktop.h"         /* Desktop manager */
 #include "dock_icons.h"      /* Dock icons (PNG-based) */
+#include "drivers/virtio_9p.h"
 #include "fs/vfs.h"          /* VFS headers */
 #include "icons.h"           /* Icon bitmaps */
+#include "media/avi.h"
 #include "media/media.h"
 #include "mm/kmalloc.h"
 #include "printk.h"
@@ -27,6 +30,9 @@ extern int term_get_input_len(struct terminal *t);
 extern char term_get_input_char(struct terminal *t, int idx);
 extern void term_render(struct terminal *term);
 extern void term_set_content_pos(struct terminal *t, int x, int y);
+
+/* Used in wallpaper/thumb/image rendering; defined later with other draw helpers. */
+static inline uint32_t blend_pixel_over(uint32_t src, uint32_t dst);
 
 /* ===================================================================== */
 /* Display and Color */
@@ -76,7 +82,7 @@ static int current_wallpaper = 0; /* 0 = Landscape (default image) */
 /* Wallpaper types: 0 = gradient, 1 = image */
 /* Wallpaper types: 0 = gradient, 1 = image */
 static struct {
-  int type;           /* 0 = gradient, 1 = JPEG image */
+  int type;           /* 0 = gradient, 1 = JPEG/PNG image */
   uint8_t tr, tg, tb; /* Gradient: Top color */
   uint8_t br, bg, bb; /* Gradient: Bottom color */
   const char *name;   /* Display name */
@@ -86,7 +92,7 @@ static struct {
     {1, 0, 0, 0, 0, 0, 0, "Nature", "/Pictures/nature.jpg"},
     {1, 0, 0, 0, 0, 0, 0, "City", "/Pictures/city.jpg"},
     {1, 0, 0, 0, 0, 0, 0, "Portrait", "/Pictures/portrait.jpg"},
-    {1, 0, 0, 0, 0, 0, 0, "Wallpaper", "/Pictures/wallpaper.jpg"},
+    {1, 0, 0, 0, 0, 0, 0, "Wallpaper", "/Pictures/wallpaper.png"},
     {0, 30, 27, 75, 15, 27, 62, "Indigo Night", NULL},
     {0, 20, 60, 100, 10, 30, 60, "Ocean Blue", NULL},
     {0, 60, 20, 60, 30, 15, 45, "Purple Haze", NULL},
@@ -112,7 +118,12 @@ static void load_thumbnails(void) {
       uint8_t *data = NULL;
       size_t size = 0;
       if (media_load_file(wallpapers[i].path, &data, &size) == 0) {
-        media_decode_jpeg(data, size, &thumbnail_cache[i]);
+        if (size >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
+            data[3] == 'G') {
+          media_decode_png(data, size, &thumbnail_cache[i]);
+        } else {
+          media_decode_jpeg(data, size, &thumbnail_cache[i]);
+        }
         media_free_file(data);
       }
     }
@@ -142,8 +153,19 @@ static void wallpaper_ensure_loaded(void) {
   size_t size = 0;
 
   if (media_load_file(path, &data, &size) == 0) {
-    if (media_decode_jpeg_buffer(data, size, &wallpaper_image, wallpaper_buffer,
-                                 sizeof(wallpaper_buffer)) == 0) {
+    int ret = -1;
+    if (size >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
+        data[3] == 'G') {
+      ret = media_decode_png_buffer(data, size, &wallpaper_image,
+                                    wallpaper_buffer,
+                                    sizeof(wallpaper_buffer));
+    } else {
+      ret = media_decode_jpeg_buffer(data, size, &wallpaper_image,
+                                     wallpaper_buffer,
+                                     sizeof(wallpaper_buffer));
+    }
+
+    if (ret == 0) {
       wallpaper_loaded = current_wallpaper;
     } else {
       /* Fallback to gradient if decode fails */
@@ -161,6 +183,21 @@ static void wallpaper_ensure_loaded(void) {
 static uint32_t wallpaper_get_pixel(int x, int y, int height) {
   int idx = current_wallpaper;
 
+  /* Gradient fallback/background */
+  int progress = (y * 256) / height;
+  if (progress < 0)
+    progress = 0;
+  if (progress > 255)
+    progress = 255;
+
+  uint8_t gr = wallpapers[idx].tr +
+               ((wallpapers[idx].br - wallpapers[idx].tr) * progress) / 256;
+  uint8_t gg = wallpapers[idx].tg +
+               ((wallpapers[idx].bg - wallpapers[idx].tg) * progress) / 256;
+  uint8_t gb = wallpapers[idx].tb +
+               ((wallpapers[idx].bb - wallpapers[idx].tb) * progress) / 256;
+  uint32_t gradient = (gr << 16) | (gg << 8) | gb;
+
   /* Image wallpaper */
   if (wallpapers[idx].type == 1 && wallpaper_image.pixels) {
     /* Scale image to fit screen */
@@ -168,25 +205,14 @@ static uint32_t wallpaper_get_pixel(int x, int y, int height) {
     int img_y = (y * wallpaper_image.height) / height;
     if (img_x >= 0 && img_x < (int)wallpaper_image.width && img_y >= 0 &&
         img_y < (int)wallpaper_image.height) {
-      return wallpaper_image.pixels[img_y * wallpaper_image.width + img_x];
+      uint32_t pixel = wallpaper_image.pixels[img_y * wallpaper_image.width +
+                                              img_x];
+      return blend_pixel_over(pixel, gradient);
     }
   }
 
   /* Gradient fallback */
-  int progress = (y * 256) / height;
-  if (progress < 0)
-    progress = 0;
-  if (progress > 255)
-    progress = 255;
-
-  uint8_t r = wallpapers[idx].tr +
-              ((wallpapers[idx].br - wallpapers[idx].tr) * progress) / 256;
-  uint8_t g = wallpapers[idx].tg +
-              ((wallpapers[idx].bg - wallpapers[idx].tg) * progress) / 256;
-  uint8_t b = wallpapers[idx].tb +
-              ((wallpapers[idx].bb - wallpapers[idx].tb) * progress) / 256;
-
-  return (r << 16) | (g << 8) | b;
+  return gradient;
 }
 
 /* Calculator state (global for click handling) */
@@ -527,6 +553,28 @@ static struct display primary_display = {0};
 /* ===================================================================== */
 /* Basic Drawing Functions */
 /* ===================================================================== */
+
+static inline uint32_t blend_pixel_over(uint32_t src, uint32_t dst) {
+  uint32_t a = src >> 24;
+  if (a >= 255)
+    return src & 0x00FFFFFF;
+  if (a == 0)
+    return dst & 0x00FFFFFF;
+
+  uint32_t sr = (src >> 16) & 0xFF;
+  uint32_t sg = (src >> 8) & 0xFF;
+  uint32_t sb = src & 0xFF;
+  uint32_t dr = (dst >> 16) & 0xFF;
+  uint32_t dg = (dst >> 8) & 0xFF;
+  uint32_t db = dst & 0xFF;
+  uint32_t inv = 255 - a;
+
+  uint32_t r = (sr * a + dr * inv + 127) / 255;
+  uint32_t g = (sg * a + dg * inv + 127) / 255;
+  uint32_t b = (sb * a + db * inv + 127) / 255;
+
+  return (r << 16) | (g << 8) | b;
+}
 
 static inline void draw_pixel(int x, int y, uint32_t color) {
   if (x < 0 || x >= (int)primary_display.width)
@@ -875,6 +923,65 @@ static int str_ends_with_ci(const char *name, const char *ext) {
   return 1;
 }
 
+static int str_starts_with(const char *s, const char *prefix) {
+  if (!s || !prefix)
+    return 0;
+  int i = 0;
+  while (prefix[i]) {
+    if (s[i] != prefix[i])
+      return 0;
+    i++;
+  }
+  return 1;
+}
+
+/*
+ * Treat /Host[/...] as a virtual hostshare mount.
+ * Returns 1 and writes a share-relative path (may be empty) into out_rel.
+ */
+static int hostshare_rel_from_path(const char *path, char *out_rel,
+                                   int out_cap) {
+  if (!path || !out_rel || out_cap <= 0)
+    return 0;
+  out_rel[0] = '\0';
+
+  int prefix_len = 0;
+  int force_videos_prefix = 0;
+
+  if (str_starts_with(path, "/Host")) {
+    prefix_len = 5;
+    force_videos_prefix = 0;
+  } else if (str_starts_with(path, "/Videos/Host")) {
+    prefix_len = 12;
+    force_videos_prefix = 1; /* Map to hostshare/Videos/ */
+  } else {
+    return 0;
+  }
+
+  char next = path[prefix_len];
+  if (!(next == '\0' || next == '/'))
+    return 0;
+
+  const char *p = path + prefix_len;
+  while (*p == '/')
+    p++;
+  int oi = 0;
+  if (force_videos_prefix) {
+    const char *vid = "Videos";
+    for (int i = 0; vid[i] && oi < out_cap - 1; i++)
+      out_rel[oi++] = vid[i];
+    if (*p && oi < out_cap - 1)
+      out_rel[oi++] = '/';
+  }
+  while (*p && oi < out_cap - 1) {
+    out_rel[oi++] = *p++;
+  }
+  while (oi > 0 && out_rel[oi - 1] == '/')
+    oi--;
+  out_rel[oi] = '\0';
+  return 1;
+}
+
 static void draw_icon(int x, int y, int size, const unsigned char *icon,
                       uint32_t fg_color, uint32_t bg_color);
 
@@ -921,6 +1028,821 @@ static void image_viewer_on_mouse(struct window *win, int x, int y,
 
 void gui_open_image_viewer(const char *path);
 static void gui_play_mp3_file(const char *path);
+
+/* ===================================================================== */
+/* Video Player (MJPEG AVI)                                              */
+/* ===================================================================== */
+
+#define VIDEO_PLAYER_DEFAULT_PATH "/Videos/demo.avi"
+#define VIDEO_PLAYER_MAX_BYTES (64u * 1024u * 1024u)
+
+struct video_player_state {
+  uint8_t *file_data;
+  size_t file_size;
+  int opened;
+
+  avi_mjpeg_t avi;
+
+  uint32_t *frame_pixels;
+  size_t frame_pixels_bytes;
+  media_image_t frame;
+  int frame_ready;
+
+  uint32_t frame_interval_ms;
+  uint32_t cur_frame;
+  int playing;
+  uint64_t next_frame_ms;
+
+  int fullscreen;
+  int source_host;
+  char source_path[128];
+
+  char host_list[16][96];
+  int host_count;
+  int host_index;
+  char status[96];
+};
+
+void gui_open_video_player(const char *path);
+
+static void video_player_set_status(struct video_player_state *vp,
+                                    const char *msg) {
+  if (!vp)
+    return;
+  int i = 0;
+  while (msg && msg[i] && i < (int)sizeof(vp->status) - 1) {
+    vp->status[i] = msg[i];
+    i++;
+  }
+  vp->status[i] = '\0';
+}
+
+static void video_player_set_source_path(struct video_player_state *vp,
+                                         const char *path) {
+  if (!vp) {
+    return;
+  }
+  int i = 0;
+  while (path && path[i] && i < (int)sizeof(vp->source_path) - 1) {
+    vp->source_path[i] = path[i];
+    i++;
+  }
+  vp->source_path[i] = '\0';
+}
+
+static int video_player_decode_frame(struct video_player_state *vp,
+                                     uint32_t frame_idx) {
+  if (!vp || !vp->opened)
+    return -1;
+  const uint8_t *jpeg = NULL;
+  size_t jpeg_sz = 0;
+  if (avi_mjpeg_get_frame(&vp->avi, frame_idx, &jpeg, &jpeg_sz) != 0)
+    return -1;
+
+  /* Ensure the chunk payload looks like JPEG (MJPEG requirement). */
+  if (!jpeg || jpeg_sz < 2 || jpeg[0] != 0xFF || jpeg[1] != 0xD8) {
+    return -2;
+  }
+
+  /* First frame: if no buffer yet, let decoder allocate to learn dimensions. */
+  if (!vp->frame_pixels) {
+    media_image_t tmp = {0};
+    if (media_decode_jpeg(jpeg, jpeg_sz, &tmp) != 0)
+      return -1;
+    vp->frame = tmp;
+    vp->frame_pixels = tmp.pixels;
+    vp->frame_pixels_bytes =
+        (size_t)tmp.width * (size_t)tmp.height * sizeof(uint32_t);
+    vp->frame_ready = 1;
+    return 0;
+  }
+
+  /* Decode into reusable buffer */
+  if (media_decode_jpeg_buffer(jpeg, jpeg_sz, &vp->frame, vp->frame_pixels,
+                               vp->frame_pixels_bytes) != 0) {
+    /* Fallback: reallocate via normal decode (in case dimensions change) */
+    if (vp->frame_pixels) {
+      kfree(vp->frame_pixels);
+      vp->frame_pixels = NULL;
+      vp->frame_pixels_bytes = 0;
+    }
+    vp->frame_ready = 0;
+    return video_player_decode_frame(vp, frame_idx);
+  }
+
+  vp->frame_ready = 1;
+  return 0;
+}
+
+static void video_player_seek_frames(struct video_player_state *vp,
+                                     int32_t delta_frames) {
+  if (!vp || !vp->opened || vp->avi.frame_count == 0)
+    return;
+
+  int32_t cur = (int32_t)vp->cur_frame;
+  int32_t next = cur + delta_frames;
+  if (next < 0)
+    next = 0;
+  if (next >= (int32_t)vp->avi.frame_count)
+    next = (int32_t)vp->avi.frame_count - 1;
+  vp->cur_frame = (uint32_t)next;
+  (void)video_player_decode_frame(vp, vp->cur_frame);
+  vp->next_frame_ms = arch_timer_get_ms() + vp->frame_interval_ms;
+}
+
+static void video_player_toggle_play(struct video_player_state *vp) {
+  if (!vp || !vp->opened)
+    return;
+  vp->playing = !vp->playing;
+  vp->next_frame_ms = arch_timer_get_ms() + vp->frame_interval_ms;
+}
+
+static void video_player_unload(struct video_player_state *vp) {
+  if (!vp)
+    return;
+  avi_mjpeg_close(&vp->avi);
+  vp->opened = 0;
+  vp->frame_ready = 0;
+  if (vp->frame_pixels) {
+    kfree(vp->frame_pixels);
+    vp->frame_pixels = NULL;
+    vp->frame_pixels_bytes = 0;
+  }
+  if (vp->file_data) {
+    media_free_file(vp->file_data);
+    vp->file_data = NULL;
+    vp->file_size = 0;
+  }
+}
+
+static int video_player_host_mjpg_alt(const char *path, char *out, int out_cap) {
+  if (!path || !out || out_cap <= 0)
+    return 0;
+  out[0] = '\0';
+
+  /* Host conversion output convention:
+   *   Videos/<name>.avi -> Videos/_mjpg/<name>_mjpg.avi */
+  if (!str_starts_with(path, "Videos/"))
+    return 0;
+  if (str_starts_with(path, "Videos/_mjpg/"))
+    return 0;
+
+  const char *base = path;
+  for (const char *p = path; *p; p++)
+    if (*p == '/')
+      base = p + 1;
+  if (!str_ends_with_ci(base, ".avi"))
+    return 0;
+
+  int base_len = 0;
+  while (base[base_len])
+    base_len++;
+  if (base_len < 4)
+    return 0;
+  int stem_len = base_len - 4; /* strip .avi */
+
+  const char *prefix = "Videos/_mjpg/";
+  const char *suffix = "_mjpg.avi";
+  int need = 0;
+  while (prefix[need])
+    need++;
+  need += stem_len;
+  for (int i = 0; suffix[i]; i++)
+    need++;
+  need += 1; /* NUL */
+
+  if (need > out_cap)
+    return 0;
+
+  int oi = 0;
+  for (int i = 0; prefix[i]; i++)
+    out[oi++] = prefix[i];
+  for (int i = 0; i < stem_len; i++)
+    out[oi++] = base[i];
+  for (int i = 0; suffix[i]; i++)
+    out[oi++] = suffix[i];
+  out[oi] = '\0';
+  return 1;
+}
+
+static int video_player_vfs_mjpg_alt(const char *path, char *out, int out_cap) {
+  if (!path || !out || out_cap <= 0)
+    return 0;
+  out[0] = '\0';
+
+  if (!str_ends_with_ci(path, ".avi"))
+    return 0;
+  if (str_ends_with_ci(path, "_mjpg.avi"))
+    return 0;
+
+  int plen = 0;
+  while (path[plen])
+    plen++;
+  if (plen < 4)
+    return 0;
+
+  const char *suffix = "_mjpg.avi";
+  int suffix_len = 0;
+  while (suffix[suffix_len])
+    suffix_len++;
+
+  /* out = <path without .avi> + _mjpg.avi */
+  if (plen - 4 + suffix_len + 1 > out_cap)
+    return 0;
+
+  int oi = 0;
+  for (int i = 0; i < plen - 4; i++)
+    out[oi++] = path[i];
+  for (int i = 0; i < suffix_len; i++)
+    out[oi++] = suffix[i];
+  out[oi] = '\0';
+  return 1;
+}
+
+static int video_player_load_from_vfs(struct video_player_state *vp,
+                                      const char *path) {
+  uint8_t *data = NULL;
+  size_t sz = 0;
+  if (media_load_file(path, &data, &sz) != 0) {
+    return -1;
+  }
+  if (sz == 0 || sz > VIDEO_PLAYER_MAX_BYTES) {
+    media_free_file(data);
+    return -1;
+  }
+
+  video_player_unload(vp);
+  vp->file_data = data;
+  vp->file_size = sz;
+  if (avi_mjpeg_open(&vp->avi, vp->file_data, vp->file_size) != 0) {
+    video_player_unload(vp);
+    char alt[256];
+    if (video_player_vfs_mjpg_alt(path, alt, (int)sizeof(alt))) {
+      if (video_player_load_from_vfs(vp, alt) == 0)
+        return 0;
+    }
+    return -1;
+  }
+
+  vp->opened = 1;
+  vp->source_host = 0;
+  video_player_set_source_path(vp, path);
+  if (vp->avi.us_per_frame) {
+    uint32_t ms = vp->avi.us_per_frame / 1000u;
+    if (ms == 0)
+      ms = 1;
+    vp->frame_interval_ms = ms;
+  }
+  vp->cur_frame = 0;
+  int dec = video_player_decode_frame(vp, 0);
+  if (dec != 0) {
+    video_player_unload(vp);
+    char alt[256];
+    if (video_player_vfs_mjpg_alt(path, alt, (int)sizeof(alt))) {
+      if (video_player_load_from_vfs(vp, alt) == 0)
+        return 0;
+    }
+    return -1;
+  }
+  vp->next_frame_ms = arch_timer_get_ms() + vp->frame_interval_ms;
+  return 0;
+}
+
+static int video_player_load_from_host(struct video_player_state *vp,
+                                       const char *path) {
+  uint8_t *data = NULL;
+  size_t sz = 0;
+  if (virtio_9p_read_file(path, &data, &sz, VIDEO_PLAYER_MAX_BYTES) != 0) {
+    char alt[256];
+    if (video_player_host_mjpg_alt(path, alt, (int)sizeof(alt))) {
+      return video_player_load_from_host(vp, alt);
+    }
+    return -1;
+  }
+  if (sz == 0 || sz > VIDEO_PLAYER_MAX_BYTES) {
+    if (data)
+      kfree(data);
+    return -1;
+  }
+
+  video_player_unload(vp);
+  vp->file_data = data;
+  vp->file_size = sz;
+  if (avi_mjpeg_open(&vp->avi, vp->file_data, vp->file_size) != 0) {
+    video_player_unload(vp);
+    char alt[256];
+    if (video_player_host_mjpg_alt(path, alt, (int)sizeof(alt))) {
+      return video_player_load_from_host(vp, alt);
+    }
+    return -1;
+  }
+
+  vp->opened = 1;
+  vp->source_host = 1;
+  video_player_set_source_path(vp, path);
+  if (vp->avi.us_per_frame) {
+    uint32_t ms = vp->avi.us_per_frame / 1000u;
+    if (ms == 0)
+      ms = 1;
+    vp->frame_interval_ms = ms;
+  }
+  vp->cur_frame = 0;
+  int dec = video_player_decode_frame(vp, 0);
+  if (dec != 0) {
+    video_player_unload(vp);
+    char alt[256];
+    if (video_player_host_mjpg_alt(path, alt, (int)sizeof(alt))) {
+      return video_player_load_from_host(vp, alt);
+    }
+    return -1;
+  }
+  vp->next_frame_ms = arch_timer_get_ms() + vp->frame_interval_ms;
+  return 0;
+}
+
+static void video_player_load_host_list(struct video_player_state *vp) {
+  if (!vp)
+    return;
+  vp->host_count = 0;
+  vp->host_index = 0;
+
+  uint8_t *data = NULL;
+  size_t sz = 0;
+  if (virtio_9p_read_file("Videos/videos.txt", &data, &sz, 64 * 1024) != 0) {
+    return;
+  }
+
+  int line_i = 0;
+  int col_i = 0;
+  for (size_t i = 0; i < sz && line_i < 16; i++) {
+    char c = (char)data[i];
+    if (c == '\r')
+      continue;
+    if (c == '\n') {
+      if (col_i > 0) {
+        vp->host_list[line_i][col_i] = '\0';
+        line_i++;
+      }
+      col_i = 0;
+      continue;
+    }
+    if (col_i == 0 && c == '#') {
+      /* skip comment to end-of-line */
+      while (i < sz && data[i] != '\n')
+        i++;
+      col_i = 0;
+      continue;
+    }
+    if ((unsigned char)c < 32)
+      continue;
+    if (col_i < 95) {
+      vp->host_list[line_i][col_i++] = c;
+    }
+  }
+  if (col_i > 0 && line_i < 16) {
+    vp->host_list[line_i][col_i] = '\0';
+    line_i++;
+  }
+
+  vp->host_count = line_i;
+  kfree(data);
+}
+
+static void video_player_on_key(struct window *win, int key) {
+  if (!win || !win->userdata)
+    return;
+  struct video_player_state *vp = (struct video_player_state *)win->userdata;
+
+  /* ESC exits fullscreen (if enabled) */
+  if (key == 27 && vp->fullscreen) {
+    vp->fullscreen = 0;
+    return;
+  }
+
+  if (key == ' ' || key == 'p' || key == 'P') {
+    video_player_toggle_play(vp);
+    return;
+  }
+
+  if (key == 'f' || key == 'F') {
+    vp->fullscreen = !vp->fullscreen;
+    return;
+  }
+
+  /* Load built-in demo regardless of host state */
+  if (key == 'd' || key == 'D') {
+    (void)video_player_load_from_vfs(vp, VIDEO_PLAYER_DEFAULT_PATH);
+    return;
+  }
+
+  /* Reload playlist */
+  if (key == 'l' || key == 'L') {
+    video_player_load_host_list(vp);
+    return;
+  }
+
+  /* Direct select playlist entries 1-9 */
+  if (key >= '1' && key <= '9') {
+    int idx = (key - '1');
+    if (idx >= 0 && idx < vp->host_count) {
+      vp->host_index = idx;
+      if (video_player_load_from_host(vp, vp->host_list[vp->host_index]) != 0) {
+        video_player_set_status(vp, "Host video failed (need MJPEG AVI)");
+      }
+    }
+    return;
+  }
+
+  /* Host playlist cycle (if videos.txt provided) */
+  if (key == ',' || key == '<') {
+    if (vp->host_count > 0) {
+      vp->host_index = (vp->host_index + vp->host_count - 1) % vp->host_count;
+      if (video_player_load_from_host(vp, vp->host_list[vp->host_index]) != 0) {
+        video_player_set_status(vp, "Host video failed (need MJPEG AVI)");
+      }
+    }
+    return;
+  }
+  if (key == '.' || key == '>') {
+    if (vp->host_count > 0) {
+      vp->host_index = (vp->host_index + 1) % vp->host_count;
+      if (video_player_load_from_host(vp, vp->host_list[vp->host_index]) != 0) {
+        video_player_set_status(vp, "Host video failed (need MJPEG AVI)");
+      }
+    }
+    return;
+  }
+
+  /* Seek/skip */
+  if (key == '[') {
+    video_player_seek_frames(vp, -(int32_t)(5000u / vp->frame_interval_ms));
+    return;
+  }
+  if (key == ']') {
+    video_player_seek_frames(vp, (int32_t)(5000u / vp->frame_interval_ms));
+    return;
+  }
+  if (key == 'b' || key == 'B') {
+    video_player_seek_frames(vp, -(int32_t)(1000u / vp->frame_interval_ms));
+    return;
+  }
+  if (key == 'n' || key == 'N') {
+    video_player_seek_frames(vp, (int32_t)(1000u / vp->frame_interval_ms));
+    return;
+  }
+  if (key == 'r' || key == 'R') {
+    vp->cur_frame = 0;
+    (void)video_player_decode_frame(vp, 0);
+    vp->next_frame_ms = arch_timer_get_ms() + vp->frame_interval_ms;
+    return;
+  }
+}
+
+static void video_player_on_mouse(struct window *win, int x, int y,
+                                  int buttons) {
+  if (!win || !win->userdata)
+    return;
+  if (!(buttons & 1))
+    return; /* left held only */
+  struct video_player_state *vp = (struct video_player_state *)win->userdata;
+  if (vp->fullscreen)
+    return;
+
+  int content_x = BORDER_WIDTH;
+  int content_y = BORDER_WIDTH + TITLEBAR_HEIGHT;
+  int content_h = win->height - 2 * BORDER_WIDTH - TITLEBAR_HEIGHT;
+
+  /* Click playlist sidebar */
+  if (vp->host_count > 0) {
+    int sidebar_w = 220;
+    int sidebar_x = content_x;
+    int sidebar_y = content_y;
+    int sidebar_h = content_h - 40;
+    if (x >= sidebar_x && x < sidebar_x + sidebar_w && y >= sidebar_y &&
+        y < sidebar_y + sidebar_h) {
+      int list_y = sidebar_y + 26;
+      int row_h = 16;
+      int idx = (y - list_y) / row_h;
+      if (idx >= 0 && idx < vp->host_count) {
+        vp->host_index = idx;
+        if (video_player_load_from_host(vp, vp->host_list[vp->host_index]) !=
+            0) {
+          video_player_set_status(vp, "Host video failed (need MJPEG AVI)");
+        }
+      }
+      return;
+    }
+  }
+
+  int bar_h = 34;
+  int bar_y = content_y + content_h - bar_h;
+  if (y < bar_y || y >= bar_y + bar_h)
+    return;
+
+  /* Simple button hit-boxes */
+  int bx = content_x + 10;
+  int by = bar_y + 6;
+  int bw = 40;
+  int bh = 22;
+
+  /* << */
+  if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+    video_player_seek_frames(vp, -(int32_t)(1000u / vp->frame_interval_ms));
+    return;
+  }
+  bx += bw + 6;
+  /* Play/Pause */
+  if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+    video_player_toggle_play(vp);
+    return;
+  }
+  bx += bw + 6;
+  /* >> */
+  if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+    video_player_seek_frames(vp, (int32_t)(1000u / vp->frame_interval_ms));
+    return;
+  }
+  bx += bw + 6;
+  /* Fullscreen */
+  if (x >= bx && x < bx + bw && y >= by && y < by + bh) {
+    vp->fullscreen = !vp->fullscreen;
+    return;
+  }
+}
+
+static void video_player_on_close(struct window *win) {
+  if (!win || !win->userdata)
+    return;
+  struct video_player_state *vp = (struct video_player_state *)win->userdata;
+
+  avi_mjpeg_close(&vp->avi);
+  if (vp->frame_pixels) {
+    kfree(vp->frame_pixels);
+    vp->frame_pixels = NULL;
+  }
+  if (vp->file_data) {
+    media_free_file(vp->file_data);
+    vp->file_data = NULL;
+  }
+  kfree(vp);
+  win->userdata = NULL;
+}
+
+static void video_player_draw_frame(struct video_player_state *vp, int draw_x,
+                                    int draw_y, int draw_w, int draw_h) {
+  if (!vp || !vp->frame_ready || !vp->frame.pixels || vp->frame.width == 0 ||
+      vp->frame.height == 0)
+    return;
+
+  int src_w = (int)vp->frame.width;
+  int src_h = (int)vp->frame.height;
+  int out_w = src_w;
+  int out_h = src_h;
+
+  if (out_w > draw_w) {
+    out_w = draw_w;
+    out_h = (src_h * out_w) / src_w;
+  }
+  if (out_h > draw_h) {
+    out_h = draw_h;
+    out_w = (src_w * out_h) / src_h;
+  }
+  if (out_w <= 0 || out_h <= 0)
+    return;
+
+  int ox = draw_x + (draw_w - out_w) / 2;
+  int oy = draw_y + (draw_h - out_h) / 2;
+
+  for (int y = 0; y < out_h; y++) {
+    int sy = (y * src_h) / out_h;
+    for (int x = 0; x < out_w; x++) {
+      int sx = (x * src_w) / out_w;
+      uint32_t px = vp->frame.pixels[sy * src_w + sx];
+      /* Video frames are opaque; blend anyway for safety */
+      draw_pixel(ox + x, oy + y, blend_pixel_over(px, 0x000000));
+    }
+  }
+}
+
+static void video_player_on_draw(struct window *win) {
+  if (!win || !win->userdata)
+    return;
+  struct video_player_state *vp = (struct video_player_state *)win->userdata;
+
+  int screen_w = (int)primary_display.width;
+  int screen_h = (int)primary_display.height;
+
+  int content_x = win->x + BORDER_WIDTH;
+  int content_y = win->y + BORDER_WIDTH + TITLEBAR_HEIGHT;
+  int content_w = win->width - 2 * BORDER_WIDTH;
+  int content_h = win->height - 2 * BORDER_WIDTH - TITLEBAR_HEIGHT;
+
+  int draw_x = vp->fullscreen ? 0 : content_x;
+  int draw_y = vp->fullscreen ? 0 : content_y;
+  int draw_w = vp->fullscreen ? screen_w : content_w;
+  int draw_h = vp->fullscreen ? screen_h : content_h;
+
+  /* Background */
+  gui_draw_rect(draw_x, draw_y, draw_w, draw_h, 0x000000);
+
+  if (!vp->opened) {
+    gui_draw_string(draw_x + 20, draw_y + 20, "Video Player (MJPEG AVI)",
+                    0xFFFFFF, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 40, "Missing or unsupported video:",
+                    0xAAAAAA, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 60, "Tried:",
+                    0xAAAAAA, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 80, VIDEO_PLAYER_DEFAULT_PATH,
+                    0x89B4FA, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 100, "/Host/Videos/demo.avi",
+                    0x89B4FA, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 120,
+                    "/Host/Videos/videos.txt (optional playlist)",
+                    0x89B4FA, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 140, "Controls: Space=Play/Pause",
+                    0xFFFFFF, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 160, "[ ] = +/-5s, N/B = +/-1s",
+                    0xFFFFFF, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 180, "F=Fullscreen, ESC=Exit FS",
+                    0xFFFFFF, 0x000000);
+    gui_draw_string(draw_x + 20, draw_y + 200,
+                    "< > = Prev/Next host file | 1-9 select | D demo",
+                    0xFFFFFF, 0x000000);
+    if (vp->status[0]) {
+      gui_draw_string(draw_x + 20, draw_y + 230, vp->status, 0xF38BA8,
+                      0x000000);
+    }
+    return;
+  }
+
+  /* Decode/advance frame based on wall-clock time */
+  uint64_t now = arch_timer_get_ms();
+  if (vp->playing && now >= vp->next_frame_ms && vp->avi.frame_count > 0) {
+    vp->cur_frame++;
+    if (vp->cur_frame >= vp->avi.frame_count) {
+      vp->cur_frame = 0;
+    }
+    (void)video_player_decode_frame(vp, vp->cur_frame);
+    vp->next_frame_ms = now + vp->frame_interval_ms;
+  }
+
+  /* Sidebar playlist (windowed mode only) */
+  int sidebar_w = (vp->fullscreen || vp->host_count == 0) ? 0 : 220;
+  if (sidebar_w) {
+    gui_draw_rect(draw_x, draw_y, sidebar_w, draw_h, 0x0B0B10);
+    gui_draw_rect_outline(draw_x, draw_y, sidebar_w, draw_h, 0x202030, 1);
+    gui_draw_string(draw_x + 8, draw_y + 4, "Host Playlist", 0xFFFFFF,
+                    0x0B0B10);
+    gui_draw_string(draw_x + 8, draw_y + 18, "Need MJPEG AVI", 0xA1A1AA,
+                    0x0B0B10);
+    int list_y = draw_y + 26;
+    for (int i = 0; i < vp->host_count; i++) {
+      int y = list_y + i * 16;
+      uint32_t bg = (i == vp->host_index) ? 0x1A1A2E : 0x0B0B10;
+      gui_draw_rect(draw_x + 1, y, sidebar_w - 2, 16, bg);
+      char label[6];
+      label[0] = (i < 9) ? ('1' + i) : ' ';
+      label[1] = '.';
+      label[2] = ' ';
+      label[3] = '\0';
+      gui_draw_string(draw_x + 6, y + 0, label, 0xCDD6F4, bg);
+      gui_draw_string(draw_x + 28, y + 0, vp->host_list[i], 0xCDD6F4, bg);
+    }
+  }
+
+  /* Leave room for controls bar if not fullscreen */
+  int bar_h = vp->fullscreen ? 0 : 34;
+  int video_h = draw_h - bar_h;
+  if (video_h < 1)
+    video_h = draw_h;
+
+  video_player_draw_frame(vp, draw_x + sidebar_w, draw_y, draw_w - sidebar_w,
+                          video_h);
+
+  if (!vp->fullscreen) {
+    int bar_y = draw_y + draw_h - 34;
+    gui_draw_rect(draw_x, bar_y, draw_w, 34, 0x101018);
+    gui_draw_rect_outline(draw_x, bar_y, draw_w, 34, 0x303040, 1);
+
+    int bx = draw_x + 10;
+    int by = bar_y + 6;
+    gui_draw_rect(bx, by, 40, 22, 0x232334);
+    gui_draw_string(bx + 12, by + 4, "<<", 0xFFFFFF, 0x232334);
+    bx += 46;
+    gui_draw_rect(bx, by, 40, 22, 0x232334);
+    gui_draw_string(bx + 8, by + 4, vp->playing ? "||" : ">", 0xFFFFFF,
+                    0x232334);
+    bx += 46;
+    gui_draw_rect(bx, by, 40, 22, 0x232334);
+    gui_draw_string(bx + 12, by + 4, ">>", 0xFFFFFF, 0x232334);
+    bx += 46;
+    gui_draw_rect(bx, by, 40, 22, 0x232334);
+    gui_draw_string(bx + 10, by + 4, "FS", 0xFFFFFF, 0x232334);
+
+    /* Progress */
+    if (vp->avi.frame_count > 0) {
+      int prog_x = draw_x + 220;
+      int prog_w = draw_w - 240;
+      if (prog_w > 20) {
+        gui_draw_rect(prog_x, by + 9, prog_w, 4, 0x2A2A3A);
+        uint32_t fill = (uint32_t)(((uint64_t)prog_w * vp->cur_frame) /
+                                   (uint64_t)vp->avi.frame_count);
+        gui_draw_rect(prog_x, by + 9, (int)fill, 4, 0x6366F1);
+      }
+    }
+  }
+
+  /* Source overlay */
+  {
+    const char *prefix = vp->source_host ? "Host: " : "VFS: ";
+    char line[160];
+    int li = 0;
+    for (int i = 0; prefix[i] && li < 150; i++)
+      line[li++] = prefix[i];
+    for (int i = 0; vp->source_path[i] && li < 150; i++)
+      line[li++] = vp->source_path[i];
+    line[li] = '\0';
+    gui_draw_rect(draw_x, draw_y, draw_w, 18, 0x000000);
+    gui_draw_string(draw_x + 8, draw_y + 2, line, 0xA1A1AA, 0x000000);
+  }
+}
+
+static struct window *gui_open_video_player_window(int x, int y) {
+  struct window *win = gui_create_window("Video Player", x, y, 640, 420);
+  if (!win)
+    return NULL;
+
+  struct video_player_state *vp =
+      (struct video_player_state *)kzalloc(sizeof(*vp), GFP_KERNEL);
+  if (!vp)
+    return win;
+
+  video_player_set_status(vp, "");
+  vp->frame_interval_ms = 33;
+  vp->cur_frame = 0;
+  vp->playing = 0;
+  vp->fullscreen = 0;
+  vp->source_host = 0;
+  vp->source_path[0] = '\0';
+
+  /* If hostshare is attached, prefer playlist (videos.txt). */
+  int host_ok = (virtio_9p_init() == 0);
+  if (host_ok) {
+    video_player_load_host_list(vp);
+    if (vp->host_count > 0) {
+      int loaded = 0;
+      for (int i = 0; i < vp->host_count; i++) {
+        vp->host_index = i;
+        if (video_player_load_from_host(vp, vp->host_list[i]) == 0) {
+          loaded = 1;
+          break;
+        }
+      }
+      if (!loaded) {
+        video_player_set_status(vp, "No playable MJPEG AVI in playlist");
+      }
+    } else {
+      /* No playlist; try common demo path on host */
+      if (video_player_load_from_host(vp, "Videos/demo.avi") != 0 &&
+          video_player_load_from_host(vp, "demo.avi") != 0) {
+        video_player_set_status(vp, "Put MJPEG AVI in hostshare/Videos/");
+      }
+    }
+  }
+
+  /* Fallback to built-in demo if host isn't available. */
+  if (!vp->opened && !host_ok) {
+    if (video_player_load_from_vfs(vp, VIDEO_PLAYER_DEFAULT_PATH) != 0) {
+      video_player_set_status(vp, "Failed to load built-in demo");
+    }
+  }
+
+  win->userdata = vp;
+  win->on_draw = video_player_on_draw;
+  win->on_key = video_player_on_key;
+  win->on_mouse = video_player_on_mouse;
+  win->on_close = video_player_on_close;
+  return win;
+}
+
+void gui_open_video_player(const char *path) {
+  /* Default spawn */
+  struct window *win = gui_open_video_player_window(140, 90);
+  if (!win || !win->userdata || !path)
+    return;
+  struct video_player_state *vp = (struct video_player_state *)win->userdata;
+  char host_rel[256];
+  if (hostshare_rel_from_path(path, host_rel, (int)sizeof(host_rel))) {
+    if (video_player_load_from_host(vp, host_rel) != 0) {
+      video_player_set_status(vp, "Host video failed (need MJPEG AVI)");
+    } else {
+      vp->source_host = 1;
+      video_player_set_source_path(vp, path);
+    }
+    return;
+  }
+  (void)video_player_load_from_vfs(vp, path);
+}
 
 /* Context for finding clicked item */
 struct find_ctx {
@@ -1139,6 +2061,9 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
 
     /* New Folder: 80px offset */
     if (x >= BORDER_WIDTH + 80 && x < BORDER_WIDTH + 180) {
+      char host_rel[256];
+      if (hostshare_rel_from_path(st->path, host_rel, (int)sizeof(host_rel)))
+        return; /* Hostshare is read-only */
       /* Create "NewFolder" */
       char new_path[512];
       int p_len = 0;
@@ -1165,6 +2090,9 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
 
     /* New File: 190px offset */
     if (x >= BORDER_WIDTH + 190 && x < BORDER_WIDTH + 280) {
+      char host_rel[256];
+      if (hostshare_rel_from_path(st->path, host_rel, (int)sizeof(host_rel)))
+        return; /* Hostshare is read-only */
       /* Create "NewFile.txt" */
       /* ... (existing logic) ... */
       char new_path[512];
@@ -1192,6 +2120,9 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
 
     /* Rename: 290px offset */
     if (x >= BORDER_WIDTH + 290 && x < BORDER_WIDTH + 380) {
+      char host_rel[256];
+      if (hostshare_rel_from_path(st->path, host_rel, (int)sizeof(host_rel)))
+        return; /* Hostshare is read-only */
       if (st->selected[0]) {
         /* Build full path */
         char full_path[512];
@@ -1220,10 +2151,6 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
   }
 
   /* Handle Grid Clicks */
-  struct file *dir = vfs_open(st->path, O_RDONLY, 0);
-  if (!dir)
-    return;
-
   /* Grid Clicks */
   /* Content starts below toolbar */
   int content_x = BORDER_WIDTH + 10;
@@ -1246,12 +2173,16 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
   fctx.slot_h = 70;
   fctx.win_w = win->width - 40;
 
-  extern int vfs_readdir(
-      struct file * file, void *ctx,
-      int (*filldir)(void *, const char *, int, loff_t, ino_t, unsigned));
-  vfs_readdir(dir, &fctx, find_callback);
-
-  vfs_close(dir);
+  char host_rel[256];
+  if (hostshare_rel_from_path(st->path, host_rel, (int)sizeof(host_rel))) {
+    (void)virtio_9p_readdir(host_rel, &fctx, find_callback);
+  } else {
+    struct file *dir = vfs_open(st->path, O_RDONLY, 0);
+    if (!dir)
+      return;
+    vfs_readdir(dir, &fctx, find_callback);
+    vfs_close(dir);
+  }
 
   if (fctx.clicked) {
     /* Check if it's a file (.txt) */
@@ -1282,6 +2213,8 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
                str_ends_with_ci(st->selected, ".jpeg") ||
                str_ends_with_ci(st->selected, ".png")) {
       gui_open_image_viewer(full_path);
+    } else if (str_ends_with_ci(st->selected, ".avi")) {
+      gui_open_video_player(full_path);
     } else if (str_ends_with_ci(st->selected, ".mp3")) {
       gui_play_mp3_file(full_path);
     } else if (str_ends_with_ci(st->selected, ".py") ||
@@ -1391,7 +2324,8 @@ static void draw_image_viewer(struct window *win, int content_x, int content_y,
     for (int x = 0; x < draw_w; x++) {
       int src_x = (x * img_w) / draw_w;
       uint32_t color = st->image.pixels[src_y * img_w + src_x];
-      draw_pixel(offset_x + x, offset_y + y, color);
+      uint32_t out = blend_pixel_over(color, THEME_BG);
+      draw_pixel(offset_x + x, offset_y + y, out);
     }
   }
 }
@@ -1476,7 +2410,7 @@ void gui_open_image_viewer(const char *path) {
   /* Known image files in Pictures folder */
   static const char *pictures_files[] = {
       "test.png",      "pig.jpg",    "city.jpg",     "nature.jpg",
-      "wallpaper.jpg", "square.jpg", "portrait.jpg", "landscape.jpg"};
+      "wallpaper.png", "square.jpg", "portrait.jpg", "landscape.jpg"};
   int num_pictures = sizeof(pictures_files) / sizeof(pictures_files[0]);
 
   /* Check if we're in Pictures folder */
@@ -1783,14 +2717,28 @@ static void draw_window(struct window *win) {
     ctx.max_y = content_y + content_h;      /* Bottom edge bound */
     ctx.state = st;
 
-    /* Open VFS */
-    struct file *dir = vfs_open(path, O_RDONLY, 0);
-    if (dir) {
-      vfs_readdir(dir, &ctx, fm_render_callback);
-      vfs_close(dir);
+    /* /Host is a virtual "mount" backed by QEMU virtio-9p hostshare. */
+    char host_rel[256];
+    if (hostshare_rel_from_path(path, host_rel, (int)sizeof(host_rel))) {
+      if (virtio_9p_readdir(host_rel, &ctx, fm_render_callback) != 0) {
+        gui_draw_string(content_x + 20, yy + 20,
+                        "Hostshare not available (use make run-gui/run-gpu)",
+                        0xFF0000, 0x1E1E2E);
+        const char *err = virtio_9p_get_last_error();
+        if (err && err[0]) {
+          gui_draw_string(content_x + 20, yy + 40, err, 0xAAAAAA, 0x1E1E2E);
+        }
+      }
     } else {
-      gui_draw_string(content_x + 20, yy + 20, "Failed to open directory",
-                      0xFF0000, 0x1E1E2E);
+      /* Open VFS */
+      struct file *dir = vfs_open(path, O_RDONLY, 0);
+      if (dir) {
+        vfs_readdir(dir, &ctx, fm_render_callback);
+        vfs_close(dir);
+      } else {
+        gui_draw_string(content_x + 20, yy + 20, "Failed to open directory",
+                        0xFF0000, 0x1E1E2E);
+      }
     }
   }
   /* Paint */
@@ -2425,7 +3373,8 @@ static void draw_window(struct window *win) {
                   src_y < (int)thumb_img->height) {
                 uint32_t pixel =
                     thumb_img->pixels[src_y * thumb_img->width + src_x];
-                draw_pixel(tx + px, ty + py, pixel);
+                uint32_t out = blend_pixel_over(pixel, THEME_BG);
+                draw_pixel(tx + px, ty + py, out);
               }
             }
           }
@@ -2605,8 +3554,9 @@ static void draw_menu_bar(void) {
 #include "icons.h"
 
 static const char *dock_labels[] = {"Term",  "Files", "Calc",  "Notes", "Set",
-                                    "Clock", "DOOM",  "Snake", "Help",  "Web"};
-#define NUM_DOCK_ICONS 10
+                                    "Clock", "DOOM",  "Snake", "Help",  "Web",
+                                    "Vid"};
+#define NUM_DOCK_ICONS 11
 #define DOCK_ICON_SIZE 44  /* Slightly smaller for more icons */
 #define DOCK_ICON_MARGIN 4 /* Padding inside dock pill */
 #define DOCK_PADDING 8     /* Space between icons */
@@ -2664,6 +3614,7 @@ static const uint32_t icon_colors[] = {
     0x34D399, /* Snake - teal green */
     0x3B82F6, /* Help - blue */
     0x0EA5E9, /* Browser - sky blue */
+    0x7C3AED, /* Video - purple */
 };
 
 /* Draw a filled circle */
@@ -2939,7 +3890,7 @@ static void draw_dock(void) {
       draw_pixel(x, draw_y + 3, bg_color + 0x202020);
     }
 
-    /* Bitmap Icon */
+    /* Bitmap Icon (first 10) */
     if (i < 10) {
       const uint32_t *icon_data = dock_icons[i];
       int bmp_size = size * 3 / 4;
@@ -2954,10 +3905,22 @@ static void draw_dock(void) {
             sy = DOCK_ICON_BITMAP_SIZE - 1;
 
           uint32_t px = icon_data[sy * DOCK_ICON_BITMAP_SIZE + sx];
-          if ((px >> 24) > 128) {
-            draw_pixel(draw_x + offset + dx, draw_y + offset + dy,
-                       px & 0xFFFFFF);
+          if ((px >> 24) != 0) {
+            uint32_t out = blend_pixel_over(px, bg_color);
+            draw_pixel(draw_x + offset + dx, draw_y + offset + dy, out);
           }
+        }
+      }
+    } else if (i == 10) {
+      /* Simple vector "Play" glyph for Video */
+      int gx = draw_x + size / 2 - size / 8;
+      int gy = draw_y + size / 2 - size / 6;
+      int gh = size / 3;
+      int gw = size / 3;
+      for (int py = 0; py < gh; py++) {
+        int row_w = (gw * (py + 1)) / gh;
+        for (int px = 0; px < row_w; px++) {
+          draw_pixel(gx + px, gy + py, 0xFFFFFF);
         }
       }
     }
@@ -4003,6 +4966,9 @@ void gui_handle_mouse_event(int x, int y, int buttons) {
         case 9: /* Browser */
           gui_create_window("Browser", spawn_x + 150, spawn_y + 90, 600, 450);
           break;
+        case 10: /* Video Player */
+          gui_open_video_player_window(spawn_x + 90, spawn_y + 60);
+          break;
         }
         spawn_x = (spawn_x + 40) % 250 + 80;
         spawn_y = (spawn_y + 30) % 150 + 60;
@@ -4232,19 +5198,45 @@ void gui_open_notepad(const char *path) {
     }
     notepad_filepath[i] = '\0';
 
-    /* Read file */
-    struct file *f = vfs_open(path, O_RDONLY, 0);
-    if (f) {
-      /* Read up to max */
-      extern ssize_t vfs_read(struct file * file, char *buf, size_t count);
-      int bytes = vfs_read(f, notepad_text, NOTEPAD_MAX_TEXT - 1);
-      if (bytes >= 0) {
-        notepad_text[bytes] = '\0';
-        if (bytes < NOTEPAD_MAX_TEXT)
-          notepad_text[bytes] = '\0';
-        notepad_cursor = bytes;
+    char host_rel[256];
+    if (hostshare_rel_from_path(path, host_rel, (int)sizeof(host_rel))) {
+      /* Hostshare is read-only; disable Save-by-path for host files. */
+      notepad_filepath[0] = '\0';
+      uint8_t *data = NULL;
+      size_t sz = 0;
+      if (virtio_9p_read_file(host_rel, &data, &sz,
+                              (size_t)(NOTEPAD_MAX_TEXT - 1)) == 0 &&
+          data) {
+        int n = (sz < (size_t)(NOTEPAD_MAX_TEXT - 1))
+                    ? (int)sz
+                    : (NOTEPAD_MAX_TEXT - 1);
+        for (int j = 0; j < n; j++) {
+          char c = (char)data[j];
+          if (c == '\0')
+            c = ' ';
+          notepad_text[j] = c;
+        }
+        notepad_text[n] = '\0';
+        notepad_cursor = n;
+        kfree(data);
+      } else if (data) {
+        kfree(data);
       }
-      vfs_close(f);
+    } else {
+      /* Read file from VFS */
+      struct file *f = vfs_open(path, O_RDONLY, 0);
+      if (f) {
+        /* Read up to max */
+        extern ssize_t vfs_read(struct file * file, char *buf, size_t count);
+        int bytes = vfs_read(f, notepad_text, NOTEPAD_MAX_TEXT - 1);
+        if (bytes >= 0) {
+          notepad_text[bytes] = '\0';
+          if (bytes < NOTEPAD_MAX_TEXT)
+            notepad_text[bytes] = '\0';
+          notepad_cursor = bytes;
+        }
+        vfs_close(f);
+      }
     }
   }
 
@@ -4614,7 +5606,8 @@ static void image_viewer_on_draw(struct window *win) {
 
       if (src_x >= 0 && src_x < orig_w && src_y >= 0 && src_y < orig_h) {
         uint32_t pixel = g_imgview.image.pixels[src_y * orig_w + src_x];
-        draw_pixel(screen_x, screen_y, pixel);
+        uint32_t out = blend_pixel_over(pixel, bg_color);
+        draw_pixel(screen_x, screen_y, out);
       }
     }
   }
@@ -4709,12 +5702,11 @@ static void image_viewer_on_draw(struct window *win) {
     for (int iy = 0; iy < TOOLBAR_ICON_SIZE; iy++) {
       for (int ix = 0; ix < TOOLBAR_ICON_SIZE; ix++) {
         uint32_t pixel = icon_data[iy * TOOLBAR_ICON_SIZE + ix];
-        uint8_t alpha = (pixel >> 24) & 0xFF;
-        if (alpha > 0) {
-          /* Simple alpha blending: if alpha > 128, draw white */
-          if (alpha > 128) {
-            draw_pixel(icon_x + ix, icon_y + iy, icon_color);
-          }
+        uint32_t alpha = pixel >> 24;
+        if (alpha != 0) {
+          uint32_t src = (alpha << 24) | (icon_color & 0x00FFFFFF);
+          uint32_t out = blend_pixel_over(src, bg);
+          draw_pixel(icon_x + ix, icon_y + iy, out);
         }
       }
     }

@@ -587,6 +587,38 @@ int ramfs_create_file(const char *path, mode_t mode, const char *content)
         }
         filename[i] = '\0';
     }
+
+    /* If file already exists, overwrite its contents */
+    struct ramfs_inode *existing = ramfs_lookup_child(parent, filename);
+    if (existing && S_ISREG(existing->mode)) {
+        /* Update mode bits but preserve inode type */
+        existing->mode = (existing->mode & S_IFMT) | (mode & 0777);
+
+        if (existing->data) {
+            kfree(existing->data);
+            existing->data = NULL;
+        }
+        existing->size = 0;
+        existing->data_capacity = 0;
+
+        if (content) {
+            size_t len = 0;
+            while (content[len]) len++;
+
+            existing->data = kmalloc(len, GFP_KERNEL);
+            if (!existing->data) {
+                return -ENOMEM;
+            }
+            for (size_t j = 0; j < len; j++) {
+                existing->data[j] = content[j];
+            }
+            existing->size = len;
+            existing->data_capacity = len;
+        }
+
+        printk(KERN_INFO "RAMFS: Updated file '%s'\n", path);
+        return 0;
+    }
     
     struct ramfs_inode *file = ramfs_alloc_inode(S_IFREG | mode, filename);
     if (!file) {
@@ -675,6 +707,34 @@ int ramfs_create_file_bytes(const char *path, mode_t mode, const uint8_t *data, 
     struct ramfs_inode *parent = ramfs_get_parent_dir(path, filename);
     if (!parent) {
         return -ENOENT;
+    }
+
+    /* If file already exists, overwrite its contents */
+    struct ramfs_inode *existing = ramfs_lookup_child(parent, filename);
+    if (existing && S_ISREG(existing->mode)) {
+        existing->mode = (existing->mode & S_IFMT) | (mode & 0777);
+
+        if (existing->data) {
+            kfree(existing->data);
+            existing->data = NULL;
+        }
+        existing->size = 0;
+        existing->data_capacity = 0;
+
+        if (data && size > 0) {
+            existing->data = kmalloc(size, GFP_KERNEL);
+            if (!existing->data) {
+                return -ENOMEM;
+            }
+            for (size_t i = 0; i < size; i++) {
+                existing->data[i] = data[i];
+            }
+            existing->size = size;
+            existing->data_capacity = size;
+        }
+
+        printk(KERN_INFO "RAMFS: Updated file '%s' (%lu bytes)\n", path, (unsigned long)size);
+        return 0;
     }
 
     struct ramfs_inode *file = ramfs_alloc_inode(S_IFREG | mode, filename);

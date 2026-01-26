@@ -9,6 +9,9 @@ extern const unsigned int vib_seed_mp3_len;
 extern const uint8_t vib_seed_jpg[];
 extern const unsigned int vib_seed_jpg_len;
 
+extern const uint8_t vib_seed_demo_avi[];
+extern const unsigned int vib_seed_demo_avi_len;
+
 /* Bootstrap images */
 extern const unsigned char bootstrap_landscape_jpg[];
 extern const unsigned int bootstrap_landscape_jpg_len;
@@ -21,6 +24,8 @@ extern const unsigned int bootstrap_square_jpg_len;
 
 extern const unsigned char bootstrap_wallpaper_jpg[];
 extern const unsigned int bootstrap_wallpaper_jpg_len;
+extern const unsigned char bootstrap_wallpaper_png[];
+extern const unsigned int bootstrap_wallpaper_png_len;
 
 /* Real photos from the internet */
 extern const unsigned char bootstrap_nature_jpg[];
