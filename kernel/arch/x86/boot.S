@@ -77,6 +77,24 @@ gdt_start:
     .byte 0x92          /* Access: present, ring 0, data, writable */
     .byte 0xCF          /* Flags: 4KB granularity, 32-bit */
     .byte 0x00          /* Base high */
+
+    /* User Code segment (0x18) */
+    .word 0xFFFF        /* Limit low */
+    .word 0x0000        /* Base low */
+    .byte 0x00          /* Base middle */
+    .byte 0xFA          /* Access: present, ring 3, code, executable, readable */
+    .byte 0xCF          /* Flags: 4KB granularity, 32-bit */
+    .byte 0x00          /* Base high */
+
+    /* User Data segment (0x20) */
+    .word 0xFFFF        /* Limit low */
+    .word 0x0000        /* Base low */
+    .byte 0x00          /* Base middle */
+    .byte 0xF2          /* Access: present, ring 3, data, writable */
+    .byte 0xCF          /* Flags: 4KB granularity, 32-bit */
+    .byte 0x00          /* Base high */
+    
+    /* TSS (Task State Segment) would go here (0x28) - needed for interrupts from Ring 3 */
     
 gdt_end:
 

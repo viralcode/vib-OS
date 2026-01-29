@@ -21,7 +21,7 @@ LIBC = $(LIBC_DIR)/libc.a
 
 .PHONY: all clean init shell coreutils dirs
 
-all: dirs init shell coreutils
+all: dirs init shell login coreutils
 
 # Ensure build directories exist
 dirs:
@@ -44,6 +44,13 @@ shell: dirs
 coreutils: dirs
 	@echo "[BUILD] coreutils (placeholder)"
 	# Will be built when implemented
+
+# Login
+login: dirs
+	@echo "[BUILD] login"
+	@mkdir -p $(BUILD_DIR)/bin
+	@$(CC) $(CFLAGS) -c login/login.c -o $(BUILD_DIR)/login.o
+	@$(LD) $(LDFLAGS) -o $(BUILD_DIR)/bin/login $(CRT0) $(BUILD_DIR)/login.o $(LIBC)
 
 clean:
 	rm -rf $(BUILD_DIR)

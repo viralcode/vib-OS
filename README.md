@@ -16,7 +16,7 @@
   \ V /| || |_) |  | |_| |___) |
    \_/ |_||_.__/    \___/|____/ 
 
-Vib-OS v2.2.0 - Multi-Architecture OS with Full GUI
+Vib-OS v2.2.1 - Multi-Architecture OS with Full GUI
 ```
 
 <p align="center">
@@ -44,6 +44,14 @@ Vib-OS is a from-scratch, Unix-like operating system with **full multi-architect
 - ✅ **Context Switching**: Working for ARM64, x86_64, and x86
 - ✅ **Memory Management**: MMU/paging for all architectures
 - ✅ **Interrupt Handling**: GICv3 (ARM64), APIC (x86_64), PIC (x86)
+
+### Standalone x86_64 UEFI 
+
+For a simplified x86_64 build that boots directly from UEFI on real hardware, see the **[vib-os-x86_64](vib-os-x86_64/)** folder. It includes:
+- Limine bootloader integration
+- Framebuffer graphics with GUI
+- JPEG wallpaper support
+- Easy `make` build system
 
 ## 📸 Screenshots
 
@@ -196,7 +204,7 @@ graph TD
 
 ### 🔒 Security Features
 - **Spinlock Synchronization**: IRQ-safe spinlocks for ARM64 and x86_64
-- **Media Sandbox**: Fault-isolating sandbox for media decoders
+- **Media Sandbox**: Fault-isolating sandbox for media decoders (Runs in Kernel Mode/Ring 0 - Reliability feature, NOT a security boundary)
 - **ASLR**: Address Space Layout Randomization for process protection
 - **NX Protections**: Non-executable page support
 
@@ -427,8 +435,8 @@ Use UTM (https://mac.getutm.app/):
 - [x] ~~**Multi-threading**: Thread creation via clone()~~ *(Done)*
 - [x] ~~**EXT4 Write Support**: Full read/write with bitmap management~~ *(Done)*
 - [x] ~~**Userspace Execution**: Complete sys_execve implementation~~ *(Done)*
-- [ ] **x86 32-bit**: Complete kernel implementation
-- [ ] **USB Support**: Add USB mass storage and HID drivers
+- [/] **x86 32-bit**: Complete kernel implementation
+- [/] **USB Support**: Add USB mass storage and HID drivers
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
 - [ ] **PNG Support**: Add PNG image decoder

@@ -39,8 +39,15 @@ static inline uint64_t arch_irq_save_local(void) {
 #ifdef ARCH_ARM64
   asm volatile("mrs %0, daif" : "=r"(flags));
   asm volatile("msr daifset, #0xf" ::: "memory");
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
+#elif defined(ARCH_X86_64)
   asm volatile("pushfq\n\t"
+               "pop %0\n\t"
+               "cli"
+               : "=r"(flags)
+               :
+               : "memory");
+#elif defined(ARCH_X86)
+  asm volatile("pushfl\n\t"
                "pop %0\n\t"
                "cli"
                : "=r"(flags)
@@ -55,11 +62,17 @@ static inline uint64_t arch_irq_save_local(void) {
 static inline void arch_irq_restore_local(uint64_t flags) {
 #ifdef ARCH_ARM64
   asm volatile("msr daif, %0" ::"r"(flags) : "memory");
-#elif defined(ARCH_X86_64) || defined(ARCH_X86)
+#elif defined(ARCH_X86_64)
   asm volatile("push %0\n\t"
                "popfq"
                :
                : "r"(flags)
+               : "memory", "cc");
+#elif defined(ARCH_X86)
+  asm volatile("push %0\n\t"
+               "popfl"
+               :
+               : "r"((uint32_t)flags)
                : "memory", "cc");
 #endif
 }

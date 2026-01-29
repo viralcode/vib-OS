@@ -3,6 +3,7 @@
  */
 
 #include "syscall/syscall.h"
+#include "apps/kapi.h"
 #include "arch/arch.h"
 #include "drivers/uart.h"
 #include "fs/vfs.h"
@@ -135,8 +136,39 @@ static long sys_read(uint64_t fd, uint64_t buf, uint64_t count, uint64_t a3,
 
   /* Handle stdin specially */
   if (fd == 0) {
-    /* For now, stdin is not supported */
-    return 0;
+    kapi_t *api = kapi_get();
+    char *p = (char *)buf;
+    size_t n = 0;
+
+    /* Block until we get at least one character */
+    while (n < count) {
+      /* Poll for input */
+      int c = api->getc();
+
+      if (c >= 0) {
+        /* Got a character */
+        p[n++] = (char)c;
+
+        /* Return immediately on newline for line-buffering behavior */
+        if (c == '\n' || c == '\r') {
+          /* Normalize \r to \n */
+          if (c == '\r')
+            p[n - 1] = '\n';
+          return n;
+        }
+      } else {
+        /* No input available */
+        if (n > 0) {
+          /* We already read something, return it */
+          return n;
+        }
+
+        /* Nothing read yet, yield and wait */
+        extern void process_yield(void);
+        process_yield();
+      }
+    }
+    return n;
   }
 
   struct file *f = get_file((int)fd);

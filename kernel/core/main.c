@@ -5,6 +5,7 @@
  * hardware initialization is complete.
  */
 
+#include "apps/embedded_apps.h"
 #include "arch/arch.h"
 #include "drivers/pci.h"
 #include "drivers/uart.h"
@@ -253,6 +254,16 @@ static void init_subsystems(void *dtb) {
   /* Mount proc, sys, dev (placeholders) */
   printk(KERN_INFO "  Mounting procfs...\n");
 
+  /* Populate userspace binaries */
+  ramfs_create_dir("bin", 0755);
+  ramfs_create_dir("sbin", 0755);
+  ramfs_create_dir("usr", 0755);
+  ramfs_create_dir("usr/bin", 0755);
+
+  ramfs_create_file_bytes("/sbin/init", 0755, init_bin, init_bin_len);
+  ramfs_create_file_bytes("/bin/login", 0755, login_bin, login_bin_len);
+  ramfs_create_file_bytes("/bin/sh", 0755, shell_bin, shell_bin_len);
+
   /* Create examples directory with language demo files */
   ramfs_create_dir("examples", 0755);
 
@@ -413,10 +424,21 @@ static void keyboard_handler(int key) {
 }
 
 static void start_init_process(void) {
-  /* Create and start init process */
-  printk(KERN_INFO "Executing /sbin/init...\n");
+  /* Create and start init process asynchronously */
+  printk(KERN_INFO "Spawning /sbin/init...\n");
 
-  printk(KERN_INFO "Init process started (placeholder)\n");
+  extern int process_create(const char *path, int argc, char **argv);
+  extern int process_start(int pid);
+
+  char *argv[] = {"/sbin/init", NULL};
+  int pid = process_create("/sbin/init", 1, argv);
+  if (pid > 0) {
+    process_start(pid);
+    printk(KERN_INFO "Started init process (pid %d)\n", pid);
+  } else {
+    printk(KERN_ERR "Failed to start /sbin/init\n");
+  }
+
   printk(KERN_INFO "System ready.\n\n");
 
   /* Set up input handling */
@@ -504,6 +526,12 @@ static void start_init_process(void) {
 
     frame++;
     (void)frame;
+
+    /* Check if we should yield to let userspace run */
+    /* If no input events processed, yield CPU */
+    extern void process_schedule_from_irq(void); // Or just wait for IRQ?
+    // User processes run preemptively via timer IRQ, so we just loop here
+    // But we should yield to be nice if not rendering
 
     /* Short yield - allows input polling without slowing mouse */
     for (volatile int i = 0; i < 500; i++) {

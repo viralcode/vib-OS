@@ -3,6 +3,7 @@
  */
 
 #include "fs/vfs.h"
+#include "fs/fat32.h"
 #include "printk.h"
 
 /* ===================================================================== */
@@ -62,7 +63,8 @@ void vfs_init(void) {
     mounts[i] = NULL;
   }
 
-  /* TODO: Register built-in filesystems */
+  /* Register built-in filesystems */
+  register_filesystem(&fat32_fs_type);
   /* register_filesystem(&ramfs_type); */
   /* register_filesystem(&procfs_type); */
   /* register_filesystem(&sysfs_type); */

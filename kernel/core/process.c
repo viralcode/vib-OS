@@ -10,10 +10,10 @@
 #include "../include/arch/arch.h"
 #include "../include/fs/vfs_compat.h"
 #include "../include/loader/elf.h"
+#include "../include/mm/aslr.h"
 #include "../include/mm/kmalloc.h"
 #include "../include/printk.h"
 #include "../include/sync/spinlock.h"
-#include "../include/mm/aslr.h"
 
 /* Forward declare strncpy and strlen from our kernel */
 extern char *strncpy(char *dst, const char *src, size_t n);
@@ -44,6 +44,7 @@ static DEFINE_SPINLOCK(proc_table_lock);
 
 // Current process pointer - used by IRQ handler for preemption
 // NULL means kernel is running (no process to save to)
+// Global for asm access
 process_t *current_process = NULL;
 
 // Kernel context - saved when switching from kernel to a process
@@ -85,8 +86,10 @@ void process_init(void) {
 
   printf("[PROC] Process subsystem initialized (max %d processes)\n",
          MAX_PROCESSES);
-  printf("[PROC] Program load area: 0x%lx+\n", program_base);
-  printf("[PROC] kernel_context at: 0x%lx\n", (uint64_t)&kernel_context);
+  printf("[PROC] Program load area: 0x%llx+\n",
+         (unsigned long long)program_base);
+  printf("[PROC] kernel_context at: 0x%llx\n",
+         (unsigned long long)&kernel_context);
 }
 
 // Find a free slot in the process table (caller must hold proc_table_lock)
@@ -286,17 +289,39 @@ int process_create(const char *path, int argc, char **argv) {
   proc->context.r15 = (uint64_t)argv;       // r15 = argv
 #elif defined(ARCH_X86)
   arch_context_set_flags(&proc->context, 0x202); // IF (interrupts enabled)
-  // x86 32-bit: pass via stack or registers (TBD)
+  proc->context.cs = 0x08;                       // Kernel code
+  proc->context.ds = 0x10;                       // Kernel data
+  proc->context.es = 0x10;
+  proc->context.fs = 0x10;
+  proc->context.gs = 0x10;
+  proc->context.ss = 0x10;
+
+  // Pass arguments via preserved registers (ebx, esi, edi, ebp)
+  proc->context.ebx = (uint32_t)proc->entry; // Entry point
+  proc->context.esi = (uint32_t)kapi_get();  // Arg1: kapi
+  proc->context.edi = (uint32_t)argc;        // Arg2: argc
+  proc->context.ebp = (uint32_t)argv;        // Arg3: argv
+
+  // Start at our ASM wrapper
+  extern void x86_process_entry(void);
+  arch_context_set_pc(&proc->context, (uint64_t)x86_process_entry);
 #endif
 
-  // printf("[PROC] Created process '%s' pid=%d at 0x%lx-0x%lx (slot %d)\n",
-  //        proc->name, proc->pid, proc->load_base, proc->load_base +
-  //        proc->load_size, slot);
-  // printf("[PROC] Stack at 0x%lx-0x%lx\n",
-  //        (uint64_t)proc->stack_base, (uint64_t)proc->stack_base +
-  //        proc->stack_size);
+  // printf("[PROC] Created process '%s' pid=%d at 0x%llx-0x%llx (slot %d)\n",
+  //        proc->name, proc->pid, (unsigned long long)proc->load_base,
+  //        (unsigned long long)(proc->load_base + proc->load_size), slot);
+  // printf("[PROC] Stack at 0x%llx-0x%llx\n",
+  //        (unsigned long long)proc->stack_base, (unsigned long
+  //        long)proc->stack_base + proc->stack_size);
 
   return proc->pid;
+}
+
+// Helper for x86 assembly
+uint32_t get_current_stack_top(void) {
+  if (!current_process)
+    return 0;
+  return (uint32_t)current_process->stack_base + current_process->stack_size;
 }
 
 // Entry wrapper - called when a new process is switched to for the first time
@@ -329,9 +354,11 @@ static void __attribute__((naked)) process_entry_wrapper(void) {
                    : "memory");
 }
 #elif defined(ARCH_X86)
-// x86 32-bit implementation (TBD)
+// x86 32-bit implementation is handled by x86_process_entry in .S file
+// We just need a dummy wrapper if referenced, but process_create now points
+// directly to ASM.
 static void process_entry_wrapper(void) {
-  // TODO: Implement for x86
+  // Should not be called
   process_exit(0);
 }
 #endif
