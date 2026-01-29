@@ -63,83 +63,9 @@ jobs:
           path: vibos-arm64.tar.gz
           retention-days: 90
 
-  build-x86_64:
-    name: Build x86_64 Kernel
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up build environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc \
-            binutils \
-            qemu-system-x86 \
-            make \
-            lld \
-            llvm \
-            xorriso \
-            grub-pc-bin \
-            grub-efi-amd64-bin \
-            mtools \
-            dosfstools
-      
-      - name: Build x86_64 kernel
-        run: |
-          make -f Makefile.multiarch ARCH=x86_64 clean
-          make -f Makefile.multiarch ARCH=x86_64 kernel
-      
-      - name: Create x86_64 bootable images
-        run: |
-          # Create UEFI image
-          if [ -f scripts/create-uefi-image.sh ]; then
-            chmod +x scripts/create-uefi-image.sh
-            ./scripts/create-uefi-image.sh || echo "UEFI image creation skipped"
-          fi
-          
-          # Create BIOS image
-          if [ -f scripts/create-bios-image.sh ]; then
-            chmod +x scripts/create-bios-image.sh
-            ./scripts/create-bios-image.sh || echo "BIOS image creation skipped"
-          fi
-          
-          # Create ISO
-          if [ -f scripts/create-iso.sh ]; then
-            chmod +x scripts/create-iso.sh
-            ./scripts/create-iso.sh || echo "ISO creation skipped"
-          fi
-      
-      - name: Package x86_64 artifacts
-        run: |
-          mkdir -p release/x86_64
-          cp build/x86_64/kernel/vibos-x86_64.elf release/x86_64/
-          
-          # Copy bootable images if they exist
-          [ -f vibos-uefi.img ] && cp vibos-uefi.img release/x86_64/
-          [ -f vibos-bios.img ] && cp vibos-bios.img release/x86_64/
-          [ -f vibos.iso ] && cp vibos.iso release/x86_64/
-          
-          # Create checksums
-          cd release/x86_64
-          sha256sum * > SHA256SUMS
-          cd ../..
-          
-          # Create tarball
-          tar -czf vibos-x86_64.tar.gz -C release/x86_64 .
-      
-      - name: Upload x86_64 artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: vibos-x86_64
-          path: vibos-x86_64.tar.gz
-          retention-days: 90
-
   create-release:
     name: Create GitHub Release
-    needs: [build-arm64, build-x86_64]
+    needs: [build-arm64]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -152,12 +78,6 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: vibos-arm64
-          path: ./artifacts
-      
-      - name: Download x86_64 artifacts
-        uses: actions/download-artifact@v4
-        with:
-          name: vibos-x86_64
           path: ./artifacts
       
       - name: Extract version
@@ -175,12 +95,13 @@ jobs:
           cat > release_notes.md << 'EOF'
           # Vib-OS ${{ steps.get_version.outputs.version }}
           
-          A Unix-like operating system with multi-architecture support.
+          A Unix-like operating system with ARM64 support and GUI.
           
           ## 🎯 Supported Architectures
           
-          - ✅ **ARM64** - Raspberry Pi 4/5, ARM64 UEFI boards
-          - ✅ **x86_64** - Modern PCs (UEFI and Legacy BIOS)
+          - ✅ **ARM64** - Raspberry Pi 4/5, ARM64 UEFI boards, Apple Silicon (via UTM)
+          
+          > **Note**: For a standalone x86_64 UEFI build, see the [`vib-os-x86_64/`](https://github.com/viralcode/vib-OS/tree/main/vib-os-x86_64) folder.
           
           ## 📦 Downloads
           
@@ -188,14 +109,6 @@ jobs:
           - `vibos-arm64.tar.gz` - ARM64 kernel and bootable image
             - `vibos-arm64.elf` - Kernel binary
             - `vibos-arm64.img` - Bootable SD card image (if available)
-            - `SHA256SUMS` - Checksums for verification
-          
-          ### x86_64
-          - `vibos-x86_64.tar.gz` - x86_64 kernel and bootable images
-            - `vibos-x86_64.elf` - Kernel binary
-            - `vibos-uefi.img` - UEFI bootable image (if available)
-            - `vibos-bios.img` - Legacy BIOS bootable image (if available)
-            - `vibos.iso` - Bootable ISO (if available)
             - `SHA256SUMS` - Checksums for verification
           
           ## 🚀 Quick Start
@@ -212,56 +125,27 @@ jobs:
           # Insert SD card and boot
           ```
           
-          ### For x86_64 PC (UEFI)
-          ```bash
-          # Extract the archive
-          tar -xzf vibos-x86_64.tar.gz
-          
-          # Write to USB drive (replace /dev/sdX with your USB device)
-          sudo dd if=vibos-uefi.img of=/dev/sdX bs=4M status=progress
-          sync
-          
-          # Boot from USB (select UEFI boot in BIOS)
-          ```
-          
-          ### For x86_64 PC (Legacy BIOS)
-          ```bash
-          # Extract the archive
-          tar -xzf vibos-x86_64.tar.gz
-          
-          # Write to USB drive (replace /dev/sdX with your USB device)
-          sudo dd if=vibos-bios.img of=/dev/sdX bs=4M status=progress
-          sync
-          
-          # Boot from USB (select Legacy/BIOS boot)
-          ```
-          
-          ### For x86_64 VM (ISO)
-          ```bash
-          # Extract the archive
-          tar -xzf vibos-x86_64.tar.gz
-          
-          # Use vibos.iso with QEMU, VirtualBox, or VMware
-          qemu-system-x86_64 -cdrom vibos.iso -m 2G
-          ```
+          ### For Apple Silicon (UTM)
+          1. Download UTM from https://mac.getutm.app/
+          2. Create new ARM64 virtual machine
+          3. Use `vibos-arm64.img` as boot disk
+          4. Configure 2GB+ RAM and boot
           
           ## ✨ Features
           
-          - Multi-architecture support (ARM64, x86_64)
-          - Virtual memory management (MMU/paging)
-          - Process scheduling and context switching
-          - Virtual File System (VFS) with RAMFS, EXT4, APFS support
-          - Graphical User Interface (GUI) with window manager
-          - Device drivers (PCI, USB, network, storage)
-          - System calls and IPC
+          - Full graphical desktop environment
+          - Process scheduling and multi-threading
+          - Virtual File System (VFS) with RAMFS, EXT4 support
+          - TCP/IP networking stack
+          - Python and Nano scripting languages
+          - Doom, Snake, and other apps
           - Media support (JPEG, MP3)
           
           ## 📚 Documentation
           
           See the repository for detailed documentation:
-          - `BUILD_ALL.md` - Build instructions
-          - `MULTIARCH_QUICKSTART.md` - Quick reference
-          - `MULTIARCH_COMPLETE.md` - Technical details
+          - `README.md` - Full feature overview
+          - `BUILD_GUIDE.md` - Build instructions
           - `docs/` - Additional documentation
           
           ## 🔒 Verification
@@ -292,6 +176,5 @@ jobs:
           prerelease: false
           files: |
             artifacts/vibos-arm64.tar.gz
-            artifacts/vibos-x86_64.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -42,41 +42,6 @@ jobs:
           path: build/kernel/unixos.elf
           retention-days: 7
 
-  build-x86_64:
-    name: Build x86_64
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-      
-      - name: Set up build environment
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            gcc \
-            binutils \
-            make \
-            lld \
-            llvm
-      
-      - name: Build x86_64 kernel
-        run: |
-          make -f Makefile.multiarch ARCH=x86_64 clean
-          make -f Makefile.multiarch ARCH=x86_64 kernel
-      
-      - name: Check build artifacts
-        run: |
-          ls -lh build/x86_64/kernel/vibos-x86_64.elf
-          file build/x86_64/kernel/vibos-x86_64.elf
-      
-      - name: Upload build artifacts
-        uses: actions/upload-artifact@v4
-        with:
-          name: vibos-x86_64-ci
-          path: build/x86_64/kernel/vibos-x86_64.elf
-          retention-days: 7
-
   test-arm64:
     name: Test ARM64 (QEMU)
     needs: build-arm64
@@ -108,7 +73,7 @@ jobs:
 
   summary:
     name: Build Summary
-    needs: [build-arm64, build-x86_64]
+    needs: [build-arm64]
     runs-on: ubuntu-latest
     if: always()
     
@@ -120,13 +85,12 @@ jobs:
           echo "| Architecture | Status |" >> $GITHUB_STEP_SUMMARY
           echo "|--------------|--------|" >> $GITHUB_STEP_SUMMARY
           echo "| ARM64        | ${{ needs.build-arm64.result }} |" >> $GITHUB_STEP_SUMMARY
-          echo "| x86_64       | ${{ needs.build-x86_64.result }} |" >> $GITHUB_STEP_SUMMARY
           echo "" >> $GITHUB_STEP_SUMMARY
           
-          if [ "${{ needs.build-arm64.result }}" == "success" ] && [ "${{ needs.build-x86_64.result }}" == "success" ]; then
+          if [ "${{ needs.build-arm64.result }}" == "success" ]; then
             echo "✅ All builds passed!" >> $GITHUB_STEP_SUMMARY
             exit 0
           else
-            echo "❌ Some builds failed" >> $GITHUB_STEP_SUMMARY
+            echo "❌ Build failed" >> $GITHUB_STEP_SUMMARY
             exit 1
           fi
