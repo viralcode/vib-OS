@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+iso_root/
+*.iso
+*.o
+*.elf
+
+# Limine bootloader (downloaded)
+limine/
+limine-bin/
+limine-extract/
+limine.tar.xz
+limine-uefi.zip
+
+# Logs and temp files
+serial.log
+*.log
+
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Test files
+test/
+tests/
