@@ -1,14 +1,10 @@
 # Build artifacts
 build/
-iso_root/
 *.iso
 *.o
 *.elf
 
-# Limine bootloader (downloaded)
-limine/
-limine-bin/
-limine-extract/
+# Limine temp files
 limine.tar.xz
 limine-uefi.zip
 
