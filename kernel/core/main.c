@@ -345,13 +345,19 @@ static void init_subsystems(void *dtb) {
 
     /* Create demo windows with working terminal */
     extern struct window *gui_create_file_manager(int x, int y);
-    gui_create_window("Terminal", 50, 50, 400, 300);
+    gui_create_window("Terminal", 30, 40, 660, 420);
 
     /* Create and set active terminal so keyboard input works */
     {
       extern struct terminal *term_create(int x, int y, int cols, int rows);
       extern void term_set_active(struct terminal * term);
-      struct terminal *term = term_create(52, 80, 48, 15);
+      /* Calculate cols/rows from window size:
+       * Content area = window - titlebar(28) - 2*border(2) - 2*padding(4) */
+      int term_px_w = 660 - 2 * 2;     /* minus borders */
+      int term_px_h = 420 - 28 - 2 * 2; /* minus titlebar and borders */
+      int term_cols = (term_px_w - 2 * 4) / 8; /* 8px per char, 4px padding */
+      int term_rows = (term_px_h - 2 * 4) / 16; /* 16px per char */
+      struct terminal *term = term_create(32, 70, term_cols, term_rows);
       if (term) {
         term_set_active(term);
       }
@@ -413,31 +419,26 @@ static void init_subsystems(void *dtb) {
 /* Global terminal pointer for keyboard callback */
 static void *g_active_terminal = 0;
 
-/* Keyboard callback wrapper */
-/* Keyboard callback wrapper */
-static void keyboard_handler(int key) {
-  /* gui_handle_key_event is now called via gui_key_callback, not here */
+/* Flag to trigger redraw when virtio keyboard sends input */
+static volatile int g_key_pressed = 0;
 
-  /* Send to KAPI input buffer for non-windowed apps (e.g. Doom) */
+/* Keyboard callback wrapper - called from virtio keyboard driver */
+static void keyboard_handler(int key) {
   extern void kapi_sys_key_event(int key);
   kapi_sys_key_event(key);
+
+  /* Signal the event loop that a key was pressed (triggers redraw) */
+  g_key_pressed = 1;
 }
 
 static void start_init_process(void) {
-  /* Create and start init process asynchronously */
-  printk(KERN_INFO "Spawning /sbin/init...\n");
-
-  extern int process_create(const char *path, int argc, char **argv);
-  extern int process_start(int pid);
-
-  char *argv[] = {"/sbin/init", NULL};
-  int pid = process_create("/sbin/init", 1, argv);
-  if (pid > 0) {
-    process_start(pid);
-    printk(KERN_INFO "Started init process (pid %d)\n", pid);
-  } else {
-    printk(KERN_ERR "Failed to start /sbin/init\n");
-  }
+  /* NOTE: init process is skipped for now because the GUI runs entirely
+   * in kernel space. When the timer IRQ preempts the event loop to run
+   * init, its userspace syscalls are not fully implemented yet and cause
+   * the system to hang. TODO: implement proper syscall handlers before
+   * re-enabling init.
+   */
+  printk(KERN_INFO "Skipping /sbin/init (GUI runs in kernel mode)\n");
 
   printk(KERN_INFO "System ready.\n\n");
 
@@ -484,7 +485,13 @@ static void start_init_process(void) {
       needs_redraw = 1;
     }
 
-    /* Poll input system (Keyboard & Mouse) */
+    /* Check if virtio keyboard sent a key (flag set in keyboard_handler) */
+    if (g_key_pressed) {
+      g_key_pressed = 0;
+      needs_redraw = 1;
+    }
+
+    /* Poll input system again (Keyboard & Mouse) */
     extern void input_poll(void);
     input_poll();
 

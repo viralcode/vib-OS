@@ -27,6 +27,7 @@ extern int term_get_input_len(struct terminal *t);
 extern char term_get_input_char(struct terminal *t, int idx);
 extern void term_render(struct terminal *term);
 extern void term_set_content_pos(struct terminal *t, int x, int y);
+extern void term_resize(struct terminal *t, int pixel_w, int pixel_h);
 
 /* ===================================================================== */
 /* Display and Color */
@@ -2093,8 +2094,10 @@ static void draw_window(struct window *win) {
       term = term_get_active();
     }
     if (term) {
-      /* Update terminal's content area to match window position */
+      /* Update terminal's content area to match window position AND size */
       term_set_content_pos(term, content_x, content_y);
+      /* Dynamically resize terminal buffer to match current window size */
+      term_resize(term, content_w, content_h);
       term_render(term);
     } else {
       /* Fallback if no terminal */

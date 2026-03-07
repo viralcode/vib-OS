@@ -15,6 +15,7 @@ struct window;
 /* External GUI functions */
 extern void gui_draw_rect(int x, int y, int w, int h, uint32_t color);
 extern void gui_draw_char(int x, int y, char c, uint32_t fg, uint32_t bg);
+extern void gui_draw_string(int x, int y, const char *str, uint32_t fg, uint32_t bg);
 extern struct window *gui_create_window(const char *title, int x, int y, int w,
                                         int h);
 
@@ -22,11 +23,12 @@ extern struct window *gui_create_window(const char *title, int x, int y, int w,
 /* Terminal Configuration */
 /* ===================================================================== */
 
-#define TERM_COLS 80
-#define TERM_ROWS 24
+#define TERM_MAX_COLS 120
+#define TERM_MAX_ROWS 50
 #define TERM_CHAR_W 8
 #define TERM_CHAR_H 16
 #define TERM_PADDING 4
+#define TERM_SCROLLBACK_LINES 200
 
 /* Terminal colors (VT100/ANSI) */
 static const uint32_t term_colors[16] = {
@@ -53,7 +55,7 @@ static const uint32_t term_colors[16] = {
 /* ===================================================================== */
 
 struct terminal {
-  /* Character buffer */
+  /* Character buffer (visible area) */
   char *chars;
   uint8_t *fg_colors;
   uint8_t *bg_colors;
@@ -77,12 +79,18 @@ struct terminal {
   char escape_buf[32];
   int escape_len;
 
-  /* Scrollback */
-  int scroll_offset;
+  /* Scrollback buffer */
+  char *sb_chars;              /* TERM_SCROLLBACK_LINES * cols */
+  uint8_t *sb_fg;
+  uint8_t *sb_bg;
+  int sb_count;                 /* Total lines stored in scrollback */
+  int sb_head;                  /* ring-buffer write index */
+  int scroll_offset;            /* 0 = bottom (live), >0 = scrolled up */
 
   /* Associated window */
   struct window *window;
   int content_x, content_y;
+  int content_w, content_h;     /* Available pixel area for terminal */
 
   /* Input buffer */
   char input_buf[256];
@@ -118,7 +126,25 @@ static void term_clear_line(struct terminal *term, int row) {
   }
 }
 
+static void term_save_to_scrollback(struct terminal *term) {
+  if (!term->sb_chars) return;
+  /* Save the top line (row 0) into the scrollback ring buffer */
+  int sb_idx = term->sb_head % TERM_SCROLLBACK_LINES;
+  for (int col = 0; col < term->cols; col++) {
+    int src = col;  /* row 0 */
+    term->sb_chars[sb_idx * term->cols + col] = term->chars[src];
+    term->sb_fg[sb_idx * term->cols + col] = term->fg_colors[src];
+    term->sb_bg[sb_idx * term->cols + col] = term->bg_colors[src];
+  }
+  term->sb_head++;
+  if (term->sb_count < TERM_SCROLLBACK_LINES)
+    term->sb_count++;
+}
+
 static void term_scroll_up(struct terminal *term) {
+  /* Save top line to scrollback before it's lost */
+  term_save_to_scrollback(term);
+
   /* Move all lines up by one */
   for (int row = 0; row < term->rows - 1; row++) {
     for (int col = 0; col < term->cols; col++) {
@@ -132,6 +158,9 @@ static void term_scroll_up(struct terminal *term) {
 
   /* Clear last line */
   term_clear_line(term, term->rows - 1);
+
+  /* Reset scroll position when new content arrives */
+  term->scroll_offset = 0;
 }
 
 static void term_newline(struct terminal *term) {
@@ -332,28 +361,60 @@ void term_render(struct terminal *term) {
   int base_x = term->content_x + TERM_PADDING;
   int base_y = term->content_y + TERM_PADDING;
 
-  /* Draw background */
+  /* Draw background - fill entire content area */
   gui_draw_rect(term->content_x, term->content_y,
-                term->cols * TERM_CHAR_W + TERM_PADDING * 2,
-                term->rows * TERM_CHAR_H + TERM_PADDING * 2, term_colors[0]);
+                term->content_w > 0 ? term->content_w : term->cols * TERM_CHAR_W + TERM_PADDING * 2,
+                term->content_h > 0 ? term->content_h : term->rows * TERM_CHAR_H + TERM_PADDING * 2,
+                term_colors[0]);
 
-  /* Draw characters */
-  for (int row = 0; row < term->rows; row++) {
-    for (int col = 0; col < term->cols; col++) {
-      int idx = row * term->cols + col;
-      char c = term->chars[idx];
-      uint32_t fg = term_colors[term->fg_colors[idx] & 0xF];
-      uint32_t bg = term_colors[term->bg_colors[idx] & 0xF];
+  int so = term->scroll_offset;
 
-      int x = base_x + col * TERM_CHAR_W;
-      int y = base_y + row * TERM_CHAR_H;
+  if (so > 0 && term->sb_chars) {
+    /* We are scrolled up — render from scrollback + visible buffer */
+    /* Rows from scrollback: the topmost `so` rows come from scrollback */
+    int sb_rows = so < term->rows ? so : term->rows;
+    for (int row = 0; row < sb_rows; row++) {
+      /* Which scrollback line? sb_head - so + row */
+      int sb_line = (term->sb_head - so + row);
+      if (sb_line < 0) sb_line += TERM_SCROLLBACK_LINES;
+      sb_line = sb_line % TERM_SCROLLBACK_LINES;
+      for (int col = 0; col < term->cols; col++) {
+        int sidx = sb_line * term->cols + col;
+        char c = term->sb_chars[sidx];
+        uint32_t fg = term_colors[term->sb_fg[sidx] & 0xF];
+        uint32_t bg = term_colors[term->sb_bg[sidx] & 0xF];
+        gui_draw_char(base_x + col * TERM_CHAR_W, base_y + row * TERM_CHAR_H, c, fg, bg);
+      }
+    }
+    /* Remaining rows from current visible buffer */
+    for (int row = sb_rows; row < term->rows; row++) {
+      int vis_row = row - sb_rows;
+      for (int col = 0; col < term->cols; col++) {
+        int idx = vis_row * term->cols + col;
+        char c = term->chars[idx];
+        uint32_t fg = term_colors[term->fg_colors[idx] & 0xF];
+        uint32_t bg = term_colors[term->bg_colors[idx] & 0xF];
+        gui_draw_char(base_x + col * TERM_CHAR_W, base_y + row * TERM_CHAR_H, c, fg, bg);
+      }
+    }
 
-      gui_draw_char(x, y, c, fg, bg);
+    /* Draw scrollback indicator */
+    gui_draw_string(base_x, base_y, "[SCROLL]", 0xF9E2AF, term_colors[0]);
+  } else {
+    /* Normal rendering */
+    for (int row = 0; row < term->rows; row++) {
+      for (int col = 0; col < term->cols; col++) {
+        int idx = row * term->cols + col;
+        char c = term->chars[idx];
+        uint32_t fg = term_colors[term->fg_colors[idx] & 0xF];
+        uint32_t bg = term_colors[term->bg_colors[idx] & 0xF];
+        gui_draw_char(base_x + col * TERM_CHAR_W, base_y + row * TERM_CHAR_H, c, fg, bg);
+      }
     }
   }
 
-  /* Draw cursor */
-  if (term->cursor_visible) {
+  /* Draw cursor (only when not scrolled up) */
+  if (term->cursor_visible && so == 0) {
     int x = base_x + term->cursor_x * TERM_CHAR_W;
     int y = base_y + term->cursor_y * TERM_CHAR_H;
     gui_draw_rect(x, y, TERM_CHAR_W, TERM_CHAR_H, term_colors[7]);
@@ -1149,6 +1210,24 @@ void term_handle_key(struct terminal *term, int key) {
   if (!term)
     return;
 
+  /* Scroll up/down with arrow keys (0x100=UP, 0x101=DOWN) */
+  if (key == 0x100) { /* Arrow UP */
+    /* If we have scrollback, scroll up */
+    if (term->sb_count > 0 && term->scroll_offset < term->sb_count) {
+      term->scroll_offset++;
+    }
+    return;
+  }
+  if (key == 0x101) { /* Arrow DOWN */
+    if (term->scroll_offset > 0) {
+      term->scroll_offset--;
+    }
+    return;
+  }
+
+  /* Reset scroll on any other key */
+  term->scroll_offset = 0;
+
   if (key == '\n' || key == '\r') {
     /* Process command */
     term->input_buf[term->input_len] = '\0';
@@ -1198,6 +1277,12 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   if (!term)
     return NULL;
 
+  /* Clamp dimensions */
+  if (cols > TERM_MAX_COLS) cols = TERM_MAX_COLS;
+  if (rows > TERM_MAX_ROWS) rows = TERM_MAX_ROWS;
+  if (cols < 20) cols = 20;
+  if (rows < 5) rows = 5;
+
   term->cols = cols;
   term->rows = rows;
 
@@ -1206,15 +1291,38 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   term->fg_colors = kmalloc(buf_size);
   term->bg_colors = kmalloc(buf_size);
 
-  if (!term->chars || !term->fg_colors || !term->bg_colors) {
+  /* Allocate scrollback buffer */
+  size_t sb_size = TERM_SCROLLBACK_LINES * cols;
+  term->sb_chars = kmalloc(sb_size);
+  term->sb_fg = kmalloc(sb_size);
+  term->sb_bg = kmalloc(sb_size);
+  term->sb_count = 0;
+  term->sb_head = 0;
+  term->scroll_offset = 0;
+
+  if (!term->chars || !term->fg_colors || !term->bg_colors ||
+      !term->sb_chars || !term->sb_fg || !term->sb_bg) {
     if (term->chars)
       kfree(term->chars);
     if (term->fg_colors)
       kfree(term->fg_colors);
     if (term->bg_colors)
       kfree(term->bg_colors);
+    if (term->sb_chars)
+      kfree(term->sb_chars);
+    if (term->sb_fg)
+      kfree(term->sb_fg);
+    if (term->sb_bg)
+      kfree(term->sb_bg);
     kfree(term);
     return NULL;
+  }
+
+  /* Initialize scrollback to spaces */
+  for (size_t i = 0; i < sb_size; i++) {
+    term->sb_chars[i] = ' ';
+    term->sb_fg[i] = 7;
+    term->sb_bg[i] = 0;
   }
 
   /* Initialize */
@@ -1229,6 +1337,9 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   term->input_pos = 0;
   term->content_x = x;
   term->content_y = y;
+  term->content_w = cols * TERM_CHAR_W + TERM_PADDING * 2;
+  term->content_h = rows * TERM_CHAR_H + TERM_PADDING * 2;
+  term->history_count = 0;
 
   /* Init CWD */
   term->cwd[0] = '/';
@@ -1240,12 +1351,13 @@ struct terminal *term_create(int x, int y, int cols, int rows) {
   }
 
   /* Print welcome message */
-  term_puts(term, "\033[1;36mVib-OS Terminal v1.0\033[0m\n");
+  term_puts(term, "\033[1;36mVib-OS Terminal v2.0\033[0m\n");
   term_puts(term, "Type '\033[33mhelp\033[0m' for commands, "
-                  "'\033[33mneofetch\033[0m' for system info.\n\n");
+                  "'\033[33mneofetch\033[0m' for system info.\n");
+  term_puts(term, "Use \033[33mArrow Up/Down\033[0m to scroll back.\n\n");
   term_puts(term, "\033[32mvib-os\033[0m:\033[34m~\033[0m$ ");
 
-  printk(KERN_INFO "TERM: Created terminal %dx%d\n", cols, rows);
+  printk(KERN_INFO "TERM: Created terminal %dx%d (scrollback: %d lines)\n", cols, rows, TERM_SCROLLBACK_LINES);
 
   return term;
 }
@@ -1260,6 +1372,12 @@ void term_destroy(struct terminal *term) {
     kfree(term->fg_colors);
   if (term->bg_colors)
     kfree(term->bg_colors);
+  if (term->sb_chars)
+    kfree(term->sb_chars);
+  if (term->sb_fg)
+    kfree(term->sb_fg);
+  if (term->sb_bg)
+    kfree(term->sb_bg);
   kfree(term);
 }
 
@@ -1280,10 +1398,180 @@ char term_get_input_char(struct terminal *t, int idx) {
   return t->input_buf[idx];
 }
 
-/* Accessor to set content area position (for window.c) */
+/* Accessor to set content area position AND size (for window.c) */
 void term_set_content_pos(struct terminal *t, int x, int y) {
   if (!t)
     return;
   t->content_x = x;
   t->content_y = y;
 }
+
+/**
+ * Resize the terminal to fit a new pixel area.
+ *
+ * GROWING: content stays at same row positions, new rows at bottom.
+ * SHRINKING: if cursor goes out of bounds, shift up and save to scrollback.
+ */
+void term_resize(struct terminal *t, int pixel_w, int pixel_h) {
+  if (!t) return;
+
+  t->content_w = pixel_w;
+  t->content_h = pixel_h;
+
+  int new_cols = (pixel_w - 2 * TERM_PADDING) / TERM_CHAR_W;
+  int new_rows = (pixel_h - 2 * TERM_PADDING) / TERM_CHAR_H;
+
+  if (new_cols > TERM_MAX_COLS) new_cols = TERM_MAX_COLS;
+  if (new_rows > TERM_MAX_ROWS) new_rows = TERM_MAX_ROWS;
+  if (new_cols < 20) new_cols = 20;
+  if (new_rows < 5) new_rows = 5;
+
+  if (new_cols == t->cols && new_rows == t->rows) return;
+
+  int cc = new_cols < t->cols ? new_cols : t->cols;
+
+  /* 1. Allocate new visible screen buffer */
+  size_t new_size = (size_t)new_cols * new_rows;
+  char *nc = kmalloc(new_size);
+  uint8_t *nfg = kmalloc(new_size);
+  uint8_t *nbg = kmalloc(new_size);
+
+  /* 2. If width changed, allocate new scrollback buffers */
+  char *nsbc = NULL;
+  uint8_t *nsbf = NULL;
+  uint8_t *nsbb = NULL;
+  if (new_cols != t->cols && t->sb_chars) {
+    size_t ss = (size_t)TERM_SCROLLBACK_LINES * new_cols;
+    nsbc = kmalloc(ss);
+    nsbf = kmalloc(ss);
+    nsbb = kmalloc(ss);
+  }
+
+  /* 3. Check for any allocation failures */
+  bool failed = (!nc || !nfg || !nbg);
+  if (new_cols != t->cols && t->sb_chars && (!nsbc || !nsbf || !nsbb)) {
+    failed = true;
+  }
+
+  if (failed) {
+    if (nc) kfree(nc); if (nfg) kfree(nfg); if (nbg) kfree(nbg);
+    if (nsbc) kfree(nsbc); if (nsbf) kfree(nsbf); if (nsbb) kfree(nsbb);
+    return; /* Keep old terminal buffers entirely intact */
+  }
+
+  /* 4. Fill visible buffer */
+  for (size_t i = 0; i < new_size; i++) {
+    nc[i] = ' '; nfg[i] = 7; nbg[i] = 0;
+  }
+
+  /* 5. Migrate scrollback to new dimensions if necessary */
+  if (new_cols != t->cols && t->sb_chars) {
+    size_t ss = (size_t)TERM_SCROLLBACK_LINES * new_cols;
+    for (size_t i = 0; i < ss; i++) { /* Fill with blank spaces */
+      nsbc[i] = ' '; nsbf[i] = 7; nsbb[i] = 0;
+    }
+    /* Compact and copy old scrollback into the new width format */
+    for (int i = 0; i < t->sb_count; i++) {
+      int old_idx = (t->sb_head - t->sb_count + i);
+      while (old_idx < 0) old_idx += TERM_SCROLLBACK_LINES;
+      old_idx %= TERM_SCROLLBACK_LINES;
+      for (int c = 0; c < cc; c++) {
+        nsbc[i * new_cols + c] = t->sb_chars[old_idx * t->cols + c];
+        nsbf[i * new_cols + c] = t->sb_fg[old_idx * t->cols + c];
+        nsbb[i * new_cols + c] = t->sb_bg[old_idx * t->cols + c];
+      }
+    }
+    kfree(t->sb_chars); kfree(t->sb_fg); kfree(t->sb_bg);
+    t->sb_chars = nsbc;
+    t->sb_fg = nsbf;
+    t->sb_bg = nsbb;
+    t->sb_head = t->sb_count % TERM_SCROLLBACK_LINES;
+  }
+
+  /* 6. Handle growing/shrinking height */
+  if (new_rows >= t->rows) {
+    /* ==== GROWING: Pull history from scrollback to fill top space ==== */
+    int pull = new_rows - t->rows;
+    if (pull > t->sb_count) pull = t->sb_count;
+
+    for (int r = 0; r < pull; r++) {
+      int sb_idx = (t->sb_head - pull + r);
+      while (sb_idx < 0) sb_idx += TERM_SCROLLBACK_LINES;
+      sb_idx %= TERM_SCROLLBACK_LINES;
+      for (int c = 0; c < new_cols; c++) { /* new_cols because we already reformatted scrollback */
+        nc[r * new_cols + c] = t->sb_chars[sb_idx * new_cols + c];
+        nfg[r * new_cols + c] = t->sb_fg[sb_idx * new_cols + c];
+        nbg[r * new_cols + c] = t->sb_bg[sb_idx * new_cols + c];
+      }
+    }
+    if (pull > 0) {
+      t->sb_count -= pull;
+      if (t->sb_count < 0) t->sb_count = 0;
+      t->sb_head -= pull;
+      while (t->sb_head < 0) t->sb_head += TERM_SCROLLBACK_LINES;
+    }
+    
+    /* Copy visible text to below the pulled scrollback */
+    for (int r = 0; r < t->rows; r++) {
+      int dr = pull + r;
+      if (dr < new_rows) {
+        for (int c = 0; c < cc; c++) {
+          nc[dr * new_cols + c] = t->chars[r * t->cols + c];
+          nfg[dr * new_cols + c] = t->fg_colors[r * t->cols + c];
+          nbg[dr * new_cols + c] = t->bg_colors[r * t->cols + c];
+        }
+      }
+    }
+    t->cursor_y += pull;
+  } else {
+    /* ==== SHRINKING: Push chopped top rows into scrollback ==== */
+    if (t->cursor_y >= new_rows) {
+      int shift = t->cursor_y - new_rows + 1;
+      if (t->sb_chars) {
+        for (int r = 0; r < shift; r++) {
+          int si = t->sb_head % TERM_SCROLLBACK_LINES;
+          for (int c = 0; c < cc; c++) {
+            t->sb_chars[si * new_cols + c] = t->chars[r * t->cols + c];
+            t->sb_fg[si * new_cols + c] = t->fg_colors[r * t->cols + c];
+            t->sb_bg[si * new_cols + c] = t->bg_colors[r * t->cols + c];
+          }
+          t->sb_head++;
+          if (t->sb_head >= TERM_SCROLLBACK_LINES) t->sb_head = 0;
+          if (t->sb_count < TERM_SCROLLBACK_LINES) t->sb_count++;
+        }
+      }
+      for (int r = 0; r < new_rows; r++) {
+        int sr = shift + r;
+        for (int c = 0; c < cc; c++) {
+          nc[r * new_cols + c] = t->chars[sr * t->cols + c];
+          nfg[r * new_cols + c] = t->fg_colors[sr * t->cols + c];
+          nbg[r * new_cols + c] = t->bg_colors[sr * t->cols + c];
+        }
+      }
+      t->cursor_y -= shift;
+    } else {
+      /* Fits perfectly, discard bottom rows */
+      for (int r = 0; r < new_rows; r++) {
+        for (int c = 0; c < cc; c++) {
+          nc[r * new_cols + c] = t->chars[r * t->cols + c];
+          nfg[r * new_cols + c] = t->fg_colors[r * t->cols + c];
+          nbg[r * new_cols + c] = t->bg_colors[r * t->cols + c];
+        }
+      }
+    }
+  }
+
+  kfree(t->chars); kfree(t->fg_colors); kfree(t->bg_colors);
+  t->chars = nc; t->fg_colors = nfg; t->bg_colors = nbg;
+
+  if (t->cursor_x >= new_cols) t->cursor_x = new_cols - 1;
+  if (t->cursor_y >= new_rows) t->cursor_y = new_rows - 1;
+  if (t->cursor_y < 0) t->cursor_y = 0;
+
+  t->cols = new_cols;
+  t->rows = new_rows;
+  
+  /* Clamp scroll offset in case history shrunk */
+  if (t->scroll_offset > t->sb_count) t->scroll_offset = t->sb_count;
+}
+
