@@ -251,6 +251,12 @@ static void init_subsystems(void *dtb) {
   ramfs_create_file_bytes("Pictures/test.png", 0644, bootstrap_test_png,
                           bootstrap_test_png_len);
 
+  /* Add BMP test image to Pictures */
+  extern const unsigned char bootstrap_test_bmp[];
+  extern const unsigned int bootstrap_test_bmp_len;
+  ramfs_create_file_bytes("Pictures/test.bmp", 0644, bootstrap_test_bmp,
+                          bootstrap_test_bmp_len);
+
   /* Mount proc, sys, dev (placeholders) */
   printk(KERN_INFO "  Mounting procfs...\n");
 

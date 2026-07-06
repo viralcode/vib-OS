@@ -667,8 +667,9 @@ void term_execute_command(struct terminal *term, const char *cmd) {
       return;
     }
 
-    if (!str_ends_with_ci(path, ".jpg") && !str_ends_with_ci(path, ".jpeg")) {
-      term_puts(term, "view: only .jpg/.jpeg supported\n");
+    if (!str_ends_with_ci(path, ".jpg") && !str_ends_with_ci(path, ".jpeg") &&
+        !str_ends_with_ci(path, ".png") && !str_ends_with_ci(path, ".bmp")) {
+      term_puts(term, "view: only .jpg/.jpeg/.png/.bmp supported\n");
       return;
     }
 

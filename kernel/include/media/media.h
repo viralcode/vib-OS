@@ -30,4 +30,7 @@ void media_free_audio(media_audio_t *audio);
 
 int media_decode_png(const uint8_t *data, size_t size, media_image_t *out);
 
+/* Uncompressed 24/32bpp BMP (BITMAPINFOHEADER and V4/V5 variants) */
+int media_decode_bmp(const uint8_t *data, size_t size, media_image_t *out);
+
 #endif /* _KERNEL_MEDIA_H */

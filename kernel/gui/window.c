@@ -1047,7 +1047,8 @@ static int fm_render_callback(void *ctx, const char *name, int len,
       bmp = icon_notepad;
       color = 0xFFFFFF;
     } else if (str_ends_with_ci(name, ".jpg") ||
-               str_ends_with_ci(name, ".jpeg")) {
+               str_ends_with_ci(name, ".jpeg") ||
+               str_ends_with_ci(name, ".bmp")) {
       color = 0xF9E2AF;
     } else if (str_ends_with_ci(name, ".mp3")) {
       color = 0xA6E3A1;
@@ -1280,7 +1281,8 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
       gui_open_notepad(full_path);
     } else if (str_ends_with_ci(st->selected, ".jpg") ||
                str_ends_with_ci(st->selected, ".jpeg") ||
-               str_ends_with_ci(st->selected, ".png")) {
+               str_ends_with_ci(st->selected, ".png") ||
+               str_ends_with_ci(st->selected, ".bmp")) {
       gui_open_image_viewer(full_path);
     } else if (str_ends_with_ci(st->selected, ".mp3")) {
       gui_play_mp3_file(full_path);
@@ -1422,6 +1424,11 @@ void gui_open_image_viewer(const char *path) {
     decode_ret = media_decode_png(data, size, &g_imgview.image);
     if (decode_ret != 0) {
       printk("Image Viewer: PNG decode failed\n");
+    }
+  } else if (size >= 2 && data[0] == 'B' && data[1] == 'M') {
+    decode_ret = media_decode_bmp(data, size, &g_imgview.image);
+    if (decode_ret != 0) {
+      printk("Image Viewer: BMP decode failed\n");
     }
   } else {
     /* Assume JPEG */
@@ -4413,6 +4420,8 @@ static void image_viewer_load_bootstrap(int index) {
   if (len >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
       data[3] == 'G') {
     ret = media_decode_png(data, len, &g_imgview.image);
+  } else if (len >= 2 && data[0] == 'B' && data[1] == 'M') {
+    ret = media_decode_bmp(data, len, &g_imgview.image);
   } else {
     ret = media_decode_jpeg(data, len, &g_imgview.image);
   }
@@ -4475,6 +4484,8 @@ static void image_viewer_load_from_folder(int index) {
   if (size >= 4 && data[0] == 0x89 && data[1] == 'P' && data[2] == 'N' &&
       data[3] == 'G') {
     ret = media_decode_png(data, size, &g_imgview.image);
+  } else if (size >= 2 && data[0] == 'B' && data[1] == 'M') {
+    ret = media_decode_bmp(data, size, &g_imgview.image);
   } else {
     ret = media_decode_jpeg(data, size, &g_imgview.image);
   }
