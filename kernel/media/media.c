@@ -300,3 +300,107 @@ int media_decode_png(const uint8_t *data, size_t size, media_image_t *out) {
   out->pixels = pixels;
   return 0;
 }
+
+/* --------------------------------------------------------------------- */
+/* Motion-JPEG video (.mjv)                                               */
+/* --------------------------------------------------------------------- */
+
+#define MJV_HEADER_SIZE 20
+#define MJV_MAX_FRAMES 100000
+
+static uint32_t mjv_read_le32(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
+int media_video_open(const char *path, media_video_t *out) {
+  if (!path || !out)
+    return -EINVAL;
+
+  uint8_t *data = NULL;
+  size_t size = 0;
+  int ret = media_load_file(path, &data, &size);
+  if (ret != 0)
+    return ret;
+
+  if (size < MJV_HEADER_SIZE || data[0] != 'M' || data[1] != 'J' ||
+      data[2] != 'V' || data[3] != '1') {
+    printk(KERN_ERR "MJV: bad magic in %s\n", path);
+    kfree(data);
+    return -EINVAL;
+  }
+
+  uint32_t width = mjv_read_le32(data + 4);
+  uint32_t height = mjv_read_le32(data + 8);
+  uint32_t fps = mjv_read_le32(data + 12);
+  uint32_t frame_count = mjv_read_le32(data + 16);
+
+  if (width == 0 || height == 0 || frame_count == 0 ||
+      frame_count > MJV_MAX_FRAMES || fps == 0 || fps > 120 ||
+      (size_t)width * height > 16 * 1024 * 1024) {
+    printk(KERN_ERR "MJV: bad header (%ux%u, %u fps, %u frames)\n", width,
+           height, fps, frame_count);
+    kfree(data);
+    return -EINVAL;
+  }
+
+  /* Validate the frame table fits and every frame lies within the file */
+  size_t table_end = MJV_HEADER_SIZE + (size_t)frame_count * 8;
+  if (table_end > size) {
+    printk(KERN_ERR "MJV: truncated frame table\n");
+    kfree(data);
+    return -EINVAL;
+  }
+  for (uint32_t i = 0; i < frame_count; i++) {
+    uint32_t off = mjv_read_le32(data + MJV_HEADER_SIZE + i * 8);
+    uint32_t len = mjv_read_le32(data + MJV_HEADER_SIZE + i * 8 + 4);
+    if (len == 0 || off < table_end || (size_t)off + len > size) {
+      printk(KERN_ERR "MJV: frame %u out of bounds\n", i);
+      kfree(data);
+      return -EINVAL;
+    }
+  }
+
+  uint32_t *pixels = (uint32_t *)kmalloc(
+      (size_t)width * height * sizeof(uint32_t), GFP_KERNEL);
+  if (!pixels) {
+    kfree(data);
+    return -ENOMEM;
+  }
+
+  out->data = data;
+  out->size = size;
+  out->width = width;
+  out->height = height;
+  out->fps = fps;
+  out->frame_count = frame_count;
+  out->frame_pixels = pixels;
+  return 0;
+}
+
+int media_video_get_frame(media_video_t *video, uint32_t index,
+                          media_image_t *out) {
+  if (!video || !video->data || !out || index >= video->frame_count)
+    return -EINVAL;
+
+  uint32_t off = mjv_read_le32(video->data + MJV_HEADER_SIZE + index * 8);
+  uint32_t len = mjv_read_le32(video->data + MJV_HEADER_SIZE + index * 8 + 4);
+
+  return media_decode_jpeg_buffer(
+      video->data + off, len, out, video->frame_pixels,
+      (size_t)video->width * video->height * sizeof(uint32_t));
+}
+
+void media_video_close(media_video_t *video) {
+  if (!video)
+    return;
+  if (video->frame_pixels) {
+    kfree(video->frame_pixels);
+    video->frame_pixels = NULL;
+  }
+  if (video->data) {
+    kfree(video->data);
+    video->data = NULL;
+  }
+  video->frame_count = 0;
+}

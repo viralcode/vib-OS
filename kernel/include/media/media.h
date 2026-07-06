@@ -30,4 +30,24 @@ void media_free_audio(media_audio_t *audio);
 
 int media_decode_png(const uint8_t *data, size_t size, media_image_t *out);
 
+/* Motion-JPEG video (.mjv): "MJV1" magic, u32 width/height/fps/frame_count,
+ * frame table of u32 offset + u32 size pairs, then concatenated baseline
+ * JPEG frames. All integers little-endian. See kernel/media/create_mjv.py. */
+typedef struct {
+  uint8_t *data; /* whole file, owned by this handle */
+  size_t size;
+  uint32_t width;
+  uint32_t height;
+  uint32_t fps;
+  uint32_t frame_count;
+  uint32_t *frame_pixels; /* reusable decode buffer, width*height */
+} media_video_t;
+
+int media_video_open(const char *path, media_video_t *out);
+/* Decodes one frame into the handle's reusable buffer; out->pixels aliases
+ * that buffer and stays valid until the next get_frame or close. */
+int media_video_get_frame(media_video_t *video, uint32_t index,
+                          media_image_t *out);
+void media_video_close(media_video_t *video);
+
 #endif /* _KERNEL_MEDIA_H */

@@ -415,7 +415,7 @@ Use Qemu.
 - [ ] **User Accounts**: Login screen and multi-user support
 - [ ] **Package Manager**: Install/remove applications
 - [ ] **PNG Support**: Add PNG image decoder
-- [ ] **Video Player**: Basic video playback support
+- [x] **Video Player**: Motion-JPEG (.mjv) playback with pause/seek (see `kernel/media/create_mjv.py` for the encoder)
 
 ## 🤝 Contributing
 

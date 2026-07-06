@@ -920,6 +920,7 @@ static void image_viewer_on_mouse(struct window *win, int x, int y,
                                   int buttons);
 
 void gui_open_image_viewer(const char *path);
+void gui_open_video_player(const char *path);
 static void gui_play_mp3_file(const char *path);
 
 /* Context for finding clicked item */
@@ -1051,6 +1052,8 @@ static int fm_render_callback(void *ctx, const char *name, int len,
       color = 0xF9E2AF;
     } else if (str_ends_with_ci(name, ".mp3")) {
       color = 0xA6E3A1;
+    } else if (str_ends_with_ci(name, ".mjv")) {
+      color = 0xC084FC; /* Purple for video */
     } else if (str_ends_with_ci(name, ".py")) {
       bmp = icon_python;
       color = 0xFFD43B; /* Python yellow */
@@ -1282,6 +1285,8 @@ static void fm_on_mouse(struct window *win, int x, int y, int buttons) {
                str_ends_with_ci(st->selected, ".jpeg") ||
                str_ends_with_ci(st->selected, ".png")) {
       gui_open_image_viewer(full_path);
+    } else if (str_ends_with_ci(st->selected, ".mjv")) {
+      gui_open_video_player(full_path);
     } else if (str_ends_with_ci(st->selected, ".mp3")) {
       gui_play_mp3_file(full_path);
     } else if (str_ends_with_ci(st->selected, ".py") ||
@@ -1550,6 +1555,244 @@ static void gui_play_mp3_file(const char *path) {
   intel_hda_play_pcm(audio.samples, audio.sample_count, audio.channels,
                      audio.sample_rate);
   media_free_audio(&audio);
+}
+
+/* ===================================================================== */
+/* Video Player (Motion-JPEG .mjv)                                        */
+/* ===================================================================== */
+
+#define VIDPLAYER_BAR_H 24
+
+static struct {
+  media_video_t video;
+  media_image_t frame; /* pixels alias video.frame_pixels */
+  int loaded;
+  int playing;
+  int frame_valid;
+  uint32_t frame_index;
+  uint64_t next_frame_ms;
+} g_vidplayer = {0};
+
+/* Append an unsigned int to buf at pos, return new pos */
+static int vidplayer_fmt_uint(char *buf, int pos, uint32_t v) {
+  char digits[10];
+  int n = 0;
+  do {
+    digits[n++] = '0' + (v % 10);
+    v /= 10;
+  } while (v);
+  while (n)
+    buf[pos++] = digits[--n];
+  return pos;
+}
+
+static void video_player_seek(int delta_frames) {
+  if (!g_vidplayer.loaded)
+    return;
+  int idx = (int)g_vidplayer.frame_index + delta_frames;
+  int last = (int)g_vidplayer.video.frame_count - 1;
+  if (idx < 0)
+    idx = 0;
+  if (idx > last)
+    idx = last;
+  if ((uint32_t)idx != g_vidplayer.frame_index) {
+    g_vidplayer.frame_index = (uint32_t)idx;
+    g_vidplayer.frame_valid = 0;
+  }
+}
+
+static void video_player_on_draw(struct window *win) {
+  int content_x = win->x + BORDER_WIDTH;
+  int content_y = win->y + BORDER_WIDTH + TITLEBAR_HEIGHT;
+  int content_w = win->width - 2 * BORDER_WIDTH;
+  int content_h = win->height - 2 * BORDER_WIDTH - TITLEBAR_HEIGHT;
+  int video_h = content_h - VIDPLAYER_BAR_H;
+
+  /* Dark cinematic background (matches image viewer) */
+  gui_draw_rect(content_x, content_y, content_w, content_h, 0x0D0D0D);
+
+  if (!g_vidplayer.loaded) {
+    gui_draw_string(content_x + 12, content_y + 12, "No video loaded",
+                    0x71717A, 0x0D0D0D);
+    return;
+  }
+
+  /* Advance frame when due - the compose loop calls us ~30 times/sec */
+  uint64_t now = arch_timer_get_ms();
+  if (g_vidplayer.playing && now >= g_vidplayer.next_frame_ms) {
+    g_vidplayer.frame_index++;
+    if (g_vidplayer.frame_index >= g_vidplayer.video.frame_count)
+      g_vidplayer.frame_index = 0; /* Loop */
+    g_vidplayer.frame_valid = 0;
+    g_vidplayer.next_frame_ms = now + 1000 / g_vidplayer.video.fps;
+  }
+
+  if (!g_vidplayer.frame_valid) {
+    if (media_video_get_frame(&g_vidplayer.video, g_vidplayer.frame_index,
+                              &g_vidplayer.frame) == 0) {
+      g_vidplayer.frame_valid = 1;
+    } else {
+      g_vidplayer.playing = 0;
+      gui_draw_string(content_x + 12, content_y + 12, "Frame decode error",
+                      0xF87171, 0x0D0D0D);
+      return;
+    }
+  }
+
+  /* Aspect-fit blit, same nearest-neighbor scaling as the image viewer */
+  int img_w = (int)g_vidplayer.frame.width;
+  int img_h = (int)g_vidplayer.frame.height;
+  if (img_w > 0 && img_h > 0 && video_h > 0) {
+    int draw_w = content_w;
+    int draw_h = (img_h * draw_w) / img_w;
+    if (draw_h > video_h) {
+      draw_h = video_h;
+      draw_w = (img_w * draw_h) / img_h;
+    }
+    if (draw_w > 0 && draw_h > 0) {
+      int offset_x = content_x + (content_w - draw_w) / 2;
+      int offset_y = content_y + (video_h - draw_h) / 2;
+      for (int y = 0; y < draw_h; y++) {
+        int src_y = (y * img_h) / draw_h;
+        for (int x = 0; x < draw_w; x++) {
+          int src_x = (x * img_w) / draw_w;
+          draw_pixel(offset_x + x, offset_y + y,
+                     g_vidplayer.frame.pixels[src_y * img_w + src_x]);
+        }
+      }
+    }
+  }
+
+  /* Control bar: progress track + status text */
+  int bar_y = content_y + video_h;
+  gui_draw_rect(content_x, bar_y, content_w, VIDPLAYER_BAR_H, 0x18181B);
+
+  int track_x = content_x + 8;
+  int track_w = content_w - 16;
+  gui_draw_rect(track_x, bar_y + 4, track_w, 4, 0x3F3F46);
+  uint32_t last = g_vidplayer.video.frame_count - 1;
+  int filled = last ? (int)((uint64_t)track_w * g_vidplayer.frame_index / last)
+                    : track_w;
+  gui_draw_rect(track_x, bar_y + 4, filled, 4, 0x60A5FA);
+
+  char status[64];
+  int pos = 0;
+  const char *state = g_vidplayer.playing ? "> " : "|| ";
+  for (const char *p = state; *p; p++)
+    status[pos++] = *p;
+  pos = vidplayer_fmt_uint(status, pos, g_vidplayer.frame_index + 1);
+  status[pos++] = '/';
+  pos = vidplayer_fmt_uint(status, pos, g_vidplayer.video.frame_count);
+  const char *hint = "  SPACE:pause  </>:seek";
+  for (const char *p = hint; *p; p++)
+    status[pos++] = *p;
+  status[pos] = '\0';
+  gui_draw_string(track_x, bar_y + 11, status, 0x9CA3AF, 0x18181B);
+}
+
+static void video_player_on_key(struct window *win, int key) {
+  (void)win;
+  if (!g_vidplayer.loaded)
+    return;
+  if (key == ' ') {
+    g_vidplayer.playing = !g_vidplayer.playing;
+    if (g_vidplayer.playing)
+      g_vidplayer.next_frame_ms = arch_timer_get_ms();
+  } else if (key == 0x102 || key == ',' || key == '<') {
+    video_player_seek(-(int)g_vidplayer.video.fps); /* Back ~1s */
+  } else if (key == 0x103 || key == '.' || key == '>') {
+    video_player_seek((int)g_vidplayer.video.fps); /* Forward ~1s */
+  } else if (key == 'r' || key == 'R') {
+    g_vidplayer.frame_index = 0;
+    g_vidplayer.frame_valid = 0;
+    g_vidplayer.playing = 1;
+    g_vidplayer.next_frame_ms = arch_timer_get_ms();
+  }
+}
+
+static void video_player_on_mouse(struct window *win, int x, int y,
+                                  int buttons) {
+  if (!g_vidplayer.loaded || !(buttons & 1))
+    return;
+  int content_h = win->height - 2 * BORDER_WIDTH - TITLEBAR_HEIGHT;
+  int bar_top = BORDER_WIDTH + TITLEBAR_HEIGHT + content_h - VIDPLAYER_BAR_H;
+  if (y >= bar_top) {
+    /* Click on progress bar seeks */
+    int track_x = BORDER_WIDTH + 8;
+    int track_w = win->width - 2 * BORDER_WIDTH - 16;
+    if (track_w > 0) {
+      int rel = x - track_x;
+      if (rel < 0)
+        rel = 0;
+      if (rel > track_w)
+        rel = track_w;
+      uint32_t idx = (uint32_t)((uint64_t)rel *
+                                (g_vidplayer.video.frame_count - 1) / track_w);
+      if (idx != g_vidplayer.frame_index) {
+        g_vidplayer.frame_index = idx;
+        g_vidplayer.frame_valid = 0;
+      }
+    }
+  }
+}
+
+static void video_player_on_close(struct window *win) {
+  (void)win;
+  if (g_vidplayer.loaded) {
+    media_video_close(&g_vidplayer.video);
+    g_vidplayer.loaded = 0;
+    g_vidplayer.playing = 0;
+    g_vidplayer.frame_valid = 0;
+    g_vidplayer.frame_index = 0;
+  }
+}
+
+void gui_open_video_player(const char *path) {
+  if (!path)
+    return;
+
+  /* Release any previously opened video (single global player state) */
+  if (g_vidplayer.loaded) {
+    media_video_close(&g_vidplayer.video);
+    g_vidplayer.loaded = 0;
+  }
+
+  media_video_t video;
+  if (media_video_open(path, &video) != 0) {
+    printk("Video Player: Failed to open %s\n", path);
+    return;
+  }
+
+  g_vidplayer.video = video;
+  g_vidplayer.loaded = 1;
+  g_vidplayer.playing = 1;
+  g_vidplayer.frame_valid = 0;
+  g_vidplayer.frame_index = 0;
+  g_vidplayer.next_frame_ms = arch_timer_get_ms();
+
+  printk("Video Player: %s (%ux%u, %u fps, %u frames)\n", path, video.width,
+         video.height, video.fps, video.frame_count);
+
+  /* Size the window to the video, capped to fit on screen */
+  int win_w = (int)video.width + 2 * BORDER_WIDTH;
+  int win_h =
+      (int)video.height + VIDPLAYER_BAR_H + 2 * BORDER_WIDTH + TITLEBAR_HEIGHT;
+  if (win_w < 280)
+    win_w = 280;
+  int max_w = (int)primary_display.width - 40;
+  int max_h = (int)primary_display.height - 80;
+  if (win_w > max_w)
+    win_w = max_w;
+  if (win_h > max_h)
+    win_h = max_h;
+
+  struct window *win = gui_create_window("Video Player", 120, 90, win_w, win_h);
+  if (win) {
+    win->on_draw = video_player_on_draw;
+    win->on_key = video_player_on_key;
+    win->on_mouse = video_player_on_mouse;
+    win->on_close = video_player_on_close;
+  }
 }
 
 static void draw_window(struct window *win) {
