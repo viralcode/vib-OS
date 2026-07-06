@@ -300,3 +300,90 @@ int media_decode_png(const uint8_t *data, size_t size, media_image_t *out) {
   out->pixels = pixels;
   return 0;
 }
+
+/* --------------------------------------------------------------------- */
+/* BMP decoding (uncompressed 24/32bpp)                                   */
+/* --------------------------------------------------------------------- */
+
+static uint32_t bmp_read_le32(const uint8_t *p) {
+  return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
+         ((uint32_t)p[3] << 24);
+}
+
+static uint16_t bmp_read_le16(const uint8_t *p) {
+  return (uint16_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8));
+}
+
+int media_decode_bmp(const uint8_t *data, size_t size, media_image_t *out) {
+  if (!data || !out || size < 54 || data[0] != 'B' || data[1] != 'M')
+    return -EINVAL;
+
+  uint32_t pixel_offset = bmp_read_le32(data + 10);
+  uint32_t dib_size = bmp_read_le32(data + 14);
+
+  /* BITMAPINFOHEADER (40) or the larger V4/V5 headers that extend it */
+  if (dib_size < 40 || (size_t)14 + dib_size > size) {
+    printk(KERN_ERR "BMP: unsupported DIB header (%u bytes)\n", dib_size);
+    return -EINVAL;
+  }
+
+  int32_t width = (int32_t)bmp_read_le32(data + 18);
+  int32_t height = (int32_t)bmp_read_le32(data + 22);
+  uint16_t planes = bmp_read_le16(data + 26);
+  uint16_t bpp = bmp_read_le16(data + 28);
+  uint32_t compression = bmp_read_le32(data + 30);
+
+  int top_down = 0;
+  if (height < 0) {
+    top_down = 1;
+    height = -height;
+  }
+
+  /* BI_RGB only; BI_BITFIELDS (3) is accepted for 32bpp since the
+   * standard BGRA masks match our channel extraction anyway */
+  if (planes != 1 || (bpp != 24 && bpp != 32) ||
+      (compression != 0 && !(compression == 3 && bpp == 32))) {
+    printk(KERN_ERR "BMP: unsupported format (%u bpp, compression %u)\n", bpp,
+           compression);
+    return -EINVAL;
+  }
+
+  if (width <= 0 || height <= 0 ||
+      (size_t)width > SIZE_MAX / (size_t)height) {
+    printk(KERN_ERR "BMP: bad dimensions\n");
+    return -EINVAL;
+  }
+
+  size_t pixel_count = (size_t)width * (size_t)height;
+  if (pixel_count > 16 * 1024 * 1024) {
+    printk(KERN_ERR "BMP: image too large (%zu pixels)\n", pixel_count);
+    return -EINVAL;
+  }
+
+  size_t bytes_per_px = bpp / 8;
+  size_t stride = ((size_t)width * bytes_per_px + 3) & ~(size_t)3;
+  if (pixel_offset > size || stride > (size - pixel_offset) / (size_t)height) {
+    printk(KERN_ERR "BMP: pixel data out of bounds\n");
+    return -EINVAL;
+  }
+
+  uint32_t *pixels =
+      (uint32_t *)kmalloc(pixel_count * sizeof(uint32_t), GFP_KERNEL);
+  if (!pixels)
+    return -ENOMEM;
+
+  for (int32_t y = 0; y < height; y++) {
+    int32_t src_y = top_down ? y : height - 1 - y;
+    const uint8_t *row = data + pixel_offset + (size_t)src_y * stride;
+    for (int32_t x = 0; x < width; x++) {
+      const uint8_t *px = row + (size_t)x * bytes_per_px;
+      pixels[(size_t)y * width + x] =
+          ((uint32_t)px[2] << 16) | ((uint32_t)px[1] << 8) | px[0];
+    }
+  }
+
+  out->width = (uint32_t)width;
+  out->height = (uint32_t)height;
+  out->pixels = pixels;
+  return 0;
+}
