@@ -634,8 +634,14 @@ void term_execute_command(struct terminal *term, const char *cmd) {
       return;
     }
 
+    if (str_ends_with_ci(path, ".mjv")) {
+      extern void gui_open_video_player(const char *path);
+      gui_open_video_player(path);
+      return;
+    }
+
     if (!str_ends_with_ci(path, ".mp3")) {
-      term_puts(term, "play: only .mp3 supported\n");
+      term_puts(term, "play: only .mp3 and .mjv supported\n");
       return;
     }
 

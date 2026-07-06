@@ -182,6 +182,7 @@ static void init_subsystems(void *dtb) {
   ramfs_create_dir("Documents", 0755);
   ramfs_create_dir("Downloads", 0755);
   ramfs_create_dir("Pictures", 0755);
+  ramfs_create_dir("Videos", 0755);
   ramfs_create_dir("System", 0755);
   ramfs_create_dir("Desktop", 0755);
 
@@ -250,6 +251,12 @@ static void init_subsystems(void *dtb) {
   extern const unsigned int bootstrap_test_png_len;
   ramfs_create_file_bytes("Pictures/test.png", 0644, bootstrap_test_png,
                           bootstrap_test_png_len);
+
+  /* Add sample Motion-JPEG video to Videos */
+  extern const unsigned char bootstrap_video_mjv[];
+  extern const unsigned int bootstrap_video_mjv_len;
+  ramfs_create_file_bytes("Videos/sample.mjv", 0644, bootstrap_video_mjv,
+                          bootstrap_video_mjv_len);
 
   /* Mount proc, sys, dev (placeholders) */
   printk(KERN_INFO "  Mounting procfs...\n");
