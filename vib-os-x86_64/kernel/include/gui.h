@@ -78,6 +78,8 @@ int font_string_width(const char *str);
 void gui_init(void);
 void gui_compose(void);
 void gui_main_loop(void);
+void gui_draw_string(int x, int y, const char *str, uint32_t color);
+void gui_redraw_now(void);
 
 /* Direct framebuffer access for low-level debug */
 extern uint32_t *g_fb_ptr;

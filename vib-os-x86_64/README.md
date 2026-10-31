@@ -9,9 +9,8 @@ A bare-metal x86_64 OS that boots from UEFI and shows a graphical desktop.
 - Framebuffer graphics
 - GUI with windows and desktop
 - JPEG wallpapers
-
-**What doesn't work:**
-- **Keyboard input is broken** - PS/2 and USB HID drivers exist but aren't receiving input properly. IDT/interrupt handling probably needs debugging.
+- PS/2/USB keyboard and mouse input on tested hardware
+- AHCI SATA disk discovery, GPT and FAT32 storage support
 
 ## Building
 
@@ -90,27 +89,39 @@ sudo dd if=uefi-demo.iso of=/dev/sdX bs=4M status=progress
 
 Boot from USB in UEFI mode. Legacy/CSM boot should work too.
 
+## Installing to a SATA disk
+
+On the live ISO, open **Installer** from the dock. Select a detected disk, review the target and layout, then check the acknowledgement box and click **Erase & install** to begin. Browsing and review do not write to the disk.
+
+**The install erases and repartitions the entire selected disk.** It creates one GPT EFI System Partition, formats it as FAT32, and copies the UEFI fallback loader, installed kernel, and installed Limine configuration. This is not a secure erase. Back up anything you need and verify the disk model/capacity before confirming. Only AHCI SATA disks are supported; installation creates a UEFI-bootable system and does not install a legacy BIOS boot path.
+
+The ISO carries separate live and installed kernels. The installed kernel does not include the GUI installer, the terminal `install`/`format` commands, or installer payload loading; the installer remains available on the live ISO for later reinstalls.
+
 ## Project Structure
 
 ```
 kernel/
 ├── boot/         # Limine entry point
-├── drivers/      # framebuffer, ps2, usb, acpi, pci
-├── gui/          # window manager, compositor, font rendering
+├── drivers/      # framebuffer, PS/2, USB, PCI, ACPI, AHCI
+├── fs/           # VFS, GPT, FAT32/LFN, live installer
+├── gui/          # compositor, desktop apps and live installer wizard
 ├── media/        # jpeg decoder, wallpapers
 ├── mm/           # memory allocation
 └── include/      # headers
 
-limine.conf       # bootloader config
+limine.conf       # live bootloader config and installer payloads
+limine-installed.conf # installed-system config (no installer payloads)
 Makefile          # main build
 build.sh          # alternative build script
 ```
 
 ## Known Issues
 
-1. **No keyboard** - the interrupt handler isn't wired up correctly. Check `drivers/idt.c` and `drivers/ps2.c`.
+1. **SATA/AHCI only** - NVMe, USB mass-storage installation targets, and non-512-byte logical sectors are not supported by the installer.
 
-2. **Build requires LLVM** - cross-compilation with x86_64-elf-gcc works but Makefile prefers clang.
+2. **UEFI installation only** - the ISO also supports legacy boot, but installed disks are not configured for legacy BIOS.
+
+3. **Build requires LLVM** - cross-compilation with x86_64-elf-gcc works but Makefile prefers clang.
 
 ## Cleaning
 
