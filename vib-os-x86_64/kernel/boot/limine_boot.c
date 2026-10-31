@@ -7,6 +7,10 @@
 #include "../include/limine.h"
 #include "../include/idt.h"
 #include "../include/acpi.h"
+#include "../include/ahci.h"
+#ifndef VIBOS_INSTALLED_BUILD
+#include "../include/installer.h"
+#endif
 #include "../include/string.h"
 #include "../include/types.h"
 
@@ -54,6 +58,18 @@ __attribute__((used,
                                      0x71ba76863cc55f63, 0xb2644a48c516a487},
                               .revision = 0,
                               .response = NULL};
+
+#ifndef VIBOS_INSTALLED_BUILD
+/* Limine-loaded installer payload files (live-media kernel only). */
+__attribute__((used,
+               section(".limine_requests"))) static volatile struct limine_module_request
+    installer_module_request = {.id = {0xc7b1dd30df4c8b88,
+                                       0x0a82e883a194f07b,
+                                       0x3e7e279702be32af,
+                                       0xca1c4f3bd1280cee},
+                                .revision = 0,
+                                .response = NULL};
+#endif
 
 /* Global HHDM offset for drivers to use */
 uint64_t hhdm_offset = 0xFFFF800000000000ULL;
@@ -131,6 +147,64 @@ void serial_puthex(uint64_t val) {
     serial_putc(hex[(val >> i) & 0xF]);
   }
 }
+
+#ifndef VIBOS_INSTALLED_BUILD
+static int limine_path_ends_with(const char *path, const char *suffix) {
+  size_t path_len;
+  size_t suffix_len;
+  if (!path || !suffix) return 0;
+  path_len = strlen(path);
+  suffix_len = strlen(suffix);
+  if (path_len < suffix_len) return 0;
+  return strcmp(path + path_len - suffix_len, suffix) == 0;
+}
+
+static void register_installer_payloads(void) {
+  struct limine_module_response *response = installer_module_request.response;
+  if (!response || !response->modules || response->module_count > 64) {
+    serial_puts("Installer payload modules unavailable.\n");
+    return;
+  }
+  serial_puts("Limine module count: ");
+  serial_puthex(response->module_count);
+  serial_puts("\n");
+  for (uint64_t i = 0; i < response->module_count; ++i) {
+    struct limine_file *file = response->modules[i];
+    const char *tag = NULL;
+    if (!file) continue;
+    if (file->cmdline &&
+        (strcmp(file->cmdline, "vibos-install-kernel") == 0 ||
+         strcmp(file->cmdline, "vibos-install-uefi-loader") == 0 ||
+         strcmp(file->cmdline, "vibos-install-config") == 0))
+      tag = file->cmdline;
+    else if (limine_path_ends_with(file->path, "/boot/kernel-installed.elf"))
+      tag = "vibos-install-kernel";
+    else if (limine_path_ends_with(file->path, "/EFI/BOOT/BOOTX64.EFI"))
+      tag = "vibos-install-uefi-loader";
+    else if (limine_path_ends_with(file->path, "/boot/limine-installed.conf"))
+      tag = "vibos-install-config";
+
+    serial_puts("  module path: ");
+    serial_puts(file->path ? file->path : "(none)");
+    serial_puts(" cmdline: ");
+    serial_puts(file->cmdline ? file->cmdline : "(none)");
+    serial_puts("\n");
+    if (tag && file->address && file->size &&
+        installer_register_payload(tag, file->address, file->size) ==
+            INSTALLER_OK) {
+      serial_puts("Installer payload registered: ");
+      serial_puts(tag);
+      serial_puts(" (bytes=");
+      serial_puthex(file->size);
+      serial_puts(")\n");
+    }
+  }
+  if (installer_payload_ready())
+    serial_puts("Installer payload set ready.\n");
+  else
+    serial_puts("Installer payload set incomplete.\n");
+}
+#endif /* !VIBOS_INSTALLED_BUILD */
 
 /* Parse EDID to get physical size (mm). Returns 0 on success. */
 static int edid_get_mm(const uint8_t *edid, uint64_t size,
@@ -294,6 +368,16 @@ void _start(void) {
   } else {
     acpi_init(NULL);
   }
+
+  serial_puts("Initializing AHCI storage...\n");
+  int sata_disk_count = ahci_init();
+  serial_puts("AHCI SATA disks found: ");
+  serial_puthex((uint64_t)sata_disk_count);
+  serial_puts("\n");
+
+#ifndef VIBOS_INSTALLED_BUILD
+  register_installer_payloads();
+#endif
 
   serial_puts("Framebuffer acquired:\n");
   serial_puts("  Address: ");

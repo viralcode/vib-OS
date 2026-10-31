@@ -20,6 +20,9 @@ ISO_ROOT := iso_root
 
 # Output files
 KERNEL := $(BUILD_DIR)/kernel.elf
+INSTALLED_KERNEL := $(BUILD_DIR)/kernel-installed.elf
+INSTALLED_BOOT_OBJ := $(BUILD_DIR)/installed/boot/limine_boot.o
+INSTALLED_COMPOSITOR_OBJ := $(BUILD_DIR)/installed/gui/compositor.o
 ISO := uefi-demo.iso
 
 # Compiler flags
@@ -75,6 +78,11 @@ SOURCES := $(KERNEL_DIR)/boot/limine_boot.c \
            $(KERNEL_DIR)/mm/kmalloc.c \
            $(KERNEL_DIR)/mm/mmio.c \
            $(KERNEL_DIR)/fs/vfs.c \
+           $(KERNEL_DIR)/fs/gpt.c \
+           $(KERNEL_DIR)/fs/fat32.c \
+           $(KERNEL_DIR)/fs/installer.c \
+           $(KERNEL_DIR)/drivers/blockdev.c \
+           $(KERNEL_DIR)/drivers/ahci.c \
            $(KERNEL_DIR)/drivers/framebuffer.c \
            $(KERNEL_DIR)/drivers/idt.c \
            $(KERNEL_DIR)/drivers/wc.c \
@@ -90,6 +98,7 @@ SOURCES := $(KERNEL_DIR)/boot/limine_boot.c \
            $(KERNEL_DIR)/gui/desktop_mgr.c \
            $(KERNEL_DIR)/gui/window.c \
            $(KERNEL_DIR)/gui/compositor.c \
+           $(KERNEL_DIR)/gui/installer_gui.c \
            $(KERNEL_DIR)/media/media.c \
            $(KERNEL_DIR)/media/picojpeg.c \
            $(KERNEL_DIR)/media/hd_wallpaper_landscape.c \
@@ -98,6 +107,16 @@ SOURCES := $(KERNEL_DIR)/boot/limine_boot.c \
 
 # Object files
 OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(SOURCES))
+INSTALLED_SOURCES := $(filter-out $(KERNEL_DIR)/boot/limine_boot.c \
+                                  $(KERNEL_DIR)/fs/gpt.c \
+                                  $(KERNEL_DIR)/fs/fat32.c \
+                                  $(KERNEL_DIR)/fs/installer.c \
+                                  $(KERNEL_DIR)/gui/compositor.c \
+                                  $(KERNEL_DIR)/gui/installer_gui.c,$(SOURCES))
+INSTALLED_OBJECTS := $(patsubst $(KERNEL_DIR)/%.c,$(BUILD_DIR)/%.o,$(INSTALLED_SOURCES)) \
+                     $(INSTALLED_BOOT_OBJ) $(INSTALLED_COMPOSITOR_OBJ)
+DEPS := $(OBJECTS:.o=.d) $(INSTALLED_BOOT_OBJ:.o=.d) \
+        $(INSTALLED_COMPOSITOR_OBJ:.o=.d)
 
 # Limine
 LIMINE_VERSION := 8.6.0
@@ -121,11 +140,24 @@ $(BUILD_DIR):
 # Compile C files
 $(BUILD_DIR)/%.o: $(KERNEL_DIR)/%.c | $(BUILD_DIR)
 	@mkdir -p $(dir $@)
-	$(CC) $(CFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+
+$(INSTALLED_BOOT_OBJ): $(KERNEL_DIR)/boot/limine_boot.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DVIBOS_INSTALLED_BUILD -MMD -MP -MF $(@:.o=.d) -c $< -o $@
+
+$(INSTALLED_COMPOSITOR_OBJ): $(KERNEL_DIR)/gui/compositor.c | $(BUILD_DIR)
+	@mkdir -p $(dir $@)
+	$(CC) $(CFLAGS) -DVIBOS_INSTALLED_BUILD -MMD -MP -MF $(@:.o=.d) -c $< -o $@
 
 # Link kernel
-$(KERNEL): $(OBJECTS)
+$(KERNEL): $(OBJECTS) $(KERNEL_DIR)/linker.ld
 	$(LD) $(LDFLAGS) $(OBJECTS) -o $@
+
+$(INSTALLED_KERNEL): $(INSTALLED_OBJECTS) $(KERNEL_DIR)/linker.ld
+	$(LD) $(LDFLAGS) $(INSTALLED_OBJECTS) -o $@
+
+-include $(DEPS)
 
 # Download and build Limine
 $(LIMINE_DIR):
@@ -136,7 +168,7 @@ $(LIMINE_DIR):
 	cd $(LIMINE_DIR) && ./configure --enable-uefi-x86-64 && make
 
 # Create ISO
-$(ISO): $(KERNEL) $(LIMINE_DIR)
+$(ISO): $(KERNEL) $(INSTALLED_KERNEL) $(LIMINE_DIR) limine.conf limine-installed.conf
 	@echo "Creating bootable ISO..."
 	rm -rf $(ISO_ROOT)
 	mkdir -p $(ISO_ROOT)/boot
@@ -145,6 +177,8 @@ $(ISO): $(KERNEL) $(LIMINE_DIR)
 	
 	# Copy kernel
 	cp $(KERNEL) $(ISO_ROOT)/boot/kernel.elf
+	cp $(INSTALLED_KERNEL) $(ISO_ROOT)/boot/kernel-installed.elf
+	cp limine-installed.conf $(ISO_ROOT)/boot/limine-installed.conf
 	
 	# Copy Limine config to ALL locations Limine searches
 	cp limine.conf $(ISO_ROOT)/limine.conf

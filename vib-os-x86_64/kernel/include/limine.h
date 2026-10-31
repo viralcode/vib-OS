@@ -158,4 +158,41 @@ struct limine_rsdp_request {
   struct limine_rsdp_response *response;
 };
 
+/* Files and modules loaded by Limine for the running entry. */
+struct limine_uuid {
+  uint32_t a;
+  uint16_t b;
+  uint16_t c;
+  uint8_t d[8];
+};
+
+struct limine_file {
+  uint64_t revision;
+  void *address;
+  uint64_t size;
+  char *path;
+  char *cmdline;
+  uint32_t media_type;
+  uint32_t unused;
+  uint32_t tftp_ip;
+  uint32_t tftp_port;
+  uint32_t partition_index;
+  uint32_t mbr_disk_id;
+  struct limine_uuid gpt_disk_uuid;
+  struct limine_uuid gpt_part_uuid;
+  struct limine_uuid part_uuid;
+};
+
+struct limine_module_response {
+  uint64_t revision;
+  uint64_t module_count;
+  struct limine_file **modules;
+};
+
+struct limine_module_request {
+  uint64_t id[4];
+  uint64_t revision;
+  struct limine_module_response *response;
+};
+
 #endif /* _LIMINE_H */

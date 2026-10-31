@@ -12,6 +12,13 @@
 #include "../include/usb.h"
 #include "../include/string.h"
 #include "../include/vfs.h"
+#include "../include/blockdev.h"
+#ifndef VIBOS_INSTALLED_BUILD
+#include "../include/gpt.h"
+#include "../include/fat32.h"
+#include "../include/installer.h"
+#include "../include/installer_gui.h"
+#endif
 #include "dock_icons.h"
 
 /* External font data */
@@ -402,9 +409,14 @@ static void wallpaper_build_cache(void) {
   wallpaper_cache_dirty = 0;
 }
 
-/* Dock icons info - matching test folder */
+/* Dock icons info - the installer exists only on the live ISO. */
 static const char *dock_labels[] = {"Terminal", "Files", "Calculator", "Notes", "Settings",
-                                    "Clock", "Snake", "Help", "Browser", "DOOM"};
+                                    "Clock", "Snake", "Help", "Browser",
+#ifndef VIBOS_INSTALLED_BUILD
+                                    "Installer"};
+#else
+                                    "DOOM"};
+#endif
 
 /* Icon background colors for macOS Big Sur style dock */
 static const uint32_t dock_icon_colors[] = {
@@ -417,7 +429,11 @@ static const uint32_t dock_icon_colors[] = {
     0x34D399, /* 6 - Snake - teal green */
     0x3B82F6, /* 7 - Help - blue */
     0x0EA5E9, /* 8 - Browser - sky blue */
+#ifndef VIBOS_INSTALLED_BUILD
+    0x168B78, /* 9 - Installer - teal */
+#else
     0xCC0000, /* 9 - DOOM - red */
+#endif
 };
 
 /* ===================================================================== */
@@ -585,7 +601,11 @@ static const uint32_t *get_dock_icon_data(int icon_idx) {
   case 8:
     return dock_icon_web;         /* Browser */
   case 9:
+#ifndef VIBOS_INSTALLED_BUILD
+    return dock_icon_settings;    /* Installer */
+#else
     return dock_icon_doom;        /* DOOM */
+#endif
   default:
     return dock_icon_terminal;
   }
@@ -940,6 +960,168 @@ static void term_prompt(void) {
   term_puts("$ ", 7);      /* White */
 }
 
+#ifndef VIBOS_INSTALLED_BUILD
+static void term_skip_spaces(const char **text) {
+  while (**text == ' ') ++(*text);
+}
+
+static int term_parse_index(const char **text, uint32_t *value) {
+  const char *p = *text;
+  uint32_t result = 0;
+  if (*p < '0' || *p > '9') return 0;
+  while (*p >= '0' && *p <= '9') {
+    uint32_t digit = (uint32_t)(*p - '0');
+    if (result > (0xFFFFFFFFU - digit) / 10U) return 0;
+    result = result * 10U + digit;
+    ++p;
+  }
+  *value = result;
+  *text = p;
+  return 1;
+}
+#endif
+
+#ifndef VIBOS_INSTALLED_BUILD
+static void term_format_preview(uint32_t index) {
+  blockdev_t *device = blockdev_get(index);
+  char number[24];
+  if (!device) {
+    term_puts("format: no disk with that index. Run 'disks' first.\n", 9);
+    return;
+  }
+  if (device->sector_size != 512 || device->sector_count < 70000ULL) {
+    term_puts("format: disk is unsupported or too small for FAT32; no changes made.\n", 9);
+    return;
+  }
+  term_puts("Selected disk ", 11);
+  utoa(index, number, 10);
+  term_puts(number, 7);
+  term_puts(" (", 7);
+  term_puts(device->model, 7);
+  term_puts(") - ", 7);
+  utoa((device->sector_count * device->sector_size) / 1048576ULL,
+       number, 10);
+  term_puts(number, 7);
+  term_puts(" MiB\n", 7);
+  term_puts("WARNING: this will erase/repartition the entire disk and destroy all existing data.\n", 9);
+  term_puts("To proceed, type exactly: format ", 14);
+  utoa(index, number, 10);
+  term_puts(number, 14);
+  term_puts(" ERASE ALL DATA\n", 14);
+  term_puts("No disk changes have been made yet.\n", 10);
+}
+
+static void term_format_disk(uint32_t index) {
+  blockdev_t *device = blockdev_get(index);
+  gpt_partition_t esp;
+  fat32_volume_t volume;
+  int status;
+  if (!device) {
+    term_puts("format: no disk with that index.\n", 9);
+    return;
+  }
+  if (device->sector_size != 512 || device->sector_count < 70000ULL ||
+      !device->write) {
+    term_puts("format: disk is unsupported or too small; no changes made.\n", 9);
+    return;
+  }
+  term_puts("Formatting disk ", 11);
+  term_puts(device->model, 7);
+  term_puts("...\n", 7);
+  status = gpt_create_single_esp(device, &esp);
+  if (status != GPT_OK) {
+    term_puts("format: GPT creation failed; the disk may be partially changed.\n", 9);
+    return;
+  }
+  status = fat32_format(device, esp.first_lba,
+                        esp.last_lba - esp.first_lba + 1ULL, "VIBOS");
+  if (status != FAT32_OK) {
+    term_puts("format: FAT32 formatting failed after GPT creation; disk is not ready.\n", 9);
+    return;
+  }
+  status = fat32_mount(device, esp.first_lba,
+                       esp.last_lba - esp.first_lba + 1ULL, &volume);
+  if (status != FAT32_OK) {
+    term_puts("format: FAT32 read-back validation failed.\n", 9);
+    return;
+  }
+  term_puts("GPT and FAT32 formatting completed and verified.\n", 10);
+  term_puts("This prepares storage only; it does not install Vib-OS boot files.\n", 7);
+}
+
+static void term_install_usage(void) {
+  term_puts("Vib-OS UEFI installer\n", 11);
+  if (installer_payload_ready())
+    term_puts("Boot payloads are ready (kernel, Limine UEFI loader, config).\n", 10);
+  else
+    term_puts("Install payloads are missing; boot the ISO built with install modules.\n", 9);
+  term_puts("Usage: install <disk-index> to preview the target.\n", 7);
+  term_puts("Then type the exact confirmation shown to erase, format and install.\n", 7);
+  term_puts("This creates a UEFI GPT/FAT32 install; legacy BIOS installation is not supported.\n", 14);
+}
+
+static void term_install_preview(uint32_t index) {
+  blockdev_t *device = blockdev_get(index);
+  char number[24];
+  if (!installer_payload_ready()) {
+    term_puts("install: required kernel/UEFI boot payloads are unavailable.\n", 9);
+    return;
+  }
+  if (!device) {
+    term_puts("install: no disk with that index. Run 'disks' first.\n", 9);
+    return;
+  }
+  if (!device->write || device->sector_size != 512 ||
+      device->sector_count < 70000ULL) {
+    term_puts("install: target is not writable or is too small/unsupported; no changes made.\n", 9);
+    return;
+  }
+  term_puts("Target disk ", 11);
+  utoa(index, number, 10);
+  term_puts(number, 7);
+  term_puts(" (", 7);
+  term_puts(device->model, 7);
+  term_puts(") - ", 7);
+  utoa((device->sector_count * device->sector_size) / 1048576ULL,
+       number, 10);
+  term_puts(number, 7);
+  term_puts(" MiB\n", 7);
+  term_puts("WARNING: installation erases/repartitions the entire disk.\n", 9);
+  term_puts("It creates one GPT EFI System Partition and installs UEFI boot files.\n", 7);
+  term_puts("To proceed, type exactly: install ", 14);
+  utoa(index, number, 10);
+  term_puts(number, 14);
+  term_puts(" ERASE ALL DATA\n", 14);
+  term_puts("No disk changes have been made yet.\n", 10);
+}
+
+static void term_install_disk(uint32_t index) {
+  blockdev_t *device = blockdev_get(index);
+  int status;
+  if (!installer_payload_ready()) {
+    term_puts("install: required boot payloads are missing; no changes made.\n", 9);
+    return;
+  }
+  if (!device || !device->write || device->sector_size != 512 ||
+      device->sector_count < 70000ULL) {
+    term_puts("install: target is not writable or is unsupported; no changes made.\n", 9);
+    return;
+  }
+  term_puts("Installing UEFI Vib-OS to ", 11);
+  term_puts(device->model, 7);
+  term_puts("; this will take a while...\n", 7);
+  status = installer_install(index);
+  if (status == INSTALLER_OK) {
+    term_puts("Installation complete. Kernel, Limine loader and config were read-back verified.\n", 10);
+    term_puts("Reboot and select the disk's UEFI entry. Legacy BIOS boot is not installed.\n", 7);
+  } else {
+    term_puts("Installation failed: ", 9);
+    term_puts(installer_error_string(status), 9);
+    term_puts("\nThe target may be partially formatted; do not boot it as installed.\n", 9);
+  }
+}
+#endif
+
 static void term_execute(const char *cmd) {
   term_putc('\n', 7);
 
@@ -959,6 +1141,29 @@ static void term_execute(const char *cmd) {
   } else if (strcmp(cmd, "pwd") == 0) {
     term_puts(terminal.cwd, 7);
     term_putc('\n', 7);
+  } else if (strcmp(cmd, "disks") == 0) {
+    uint32_t count = blockdev_count();
+    if (count == 0) {
+      term_puts("No AHCI SATA disks detected.\n", 9);
+    } else {
+      for (uint32_t i = 0; i < count; i++) {
+        blockdev_t *device = blockdev_get(i);
+        char size_mib[24];
+        if (!device) continue;
+        term_puts("Disk ", 11);
+        utoa(i, size_mib, 10);
+        term_puts(size_mib, 7);
+        term_puts(" (", 7);
+        term_puts(device->name, 10);
+        term_puts("): ", 7);
+        term_puts(device->model, 7);
+        term_puts(" - ", 7);
+        utoa((device->sector_count * device->sector_size) / 1048576ULL,
+             size_mib, 10);
+        term_puts(size_mib, 7);
+        term_puts(" MiB\n", 7);
+      }
+    }
   } else if (strcmp(cmd, "clear") == 0) {
     for (int r = 0; r < TERM_ROWS; r++) {
       for (int c = 0; c < TERM_COLS; c++) {
@@ -981,8 +1186,51 @@ static void term_execute(const char *cmd) {
     term_puts("  hostname  - Show hostname\n", 7);
     term_puts("  free      - Memory usage\n", 7);
     term_puts("  ps        - Process list\n", 7);
+    term_puts("  disks     - List detected AHCI SATA disks\n", 7);
+#ifndef VIBOS_INSTALLED_BUILD
+    term_puts("  format N  - Preview formatting disk N; explicit erase confirmation required\n", 7);
+    term_puts("  install   - Preview/install to a disk (destructive, exact confirmation)\n", 7);
+#endif
     term_puts("  clear     - Clear screen\n", 7);
     term_puts("  help      - This help message\n", 7);
+#ifndef VIBOS_INSTALLED_BUILD
+  } else if (strncmp(cmd, "install", 7) == 0 &&
+             (cmd[7] == ' ' || cmd[7] == '\0')) {
+    const char *args = cmd + 7;
+    uint32_t index;
+    term_skip_spaces(&args);
+    if (*args == '\0' || strcmp(args, "--help") == 0) {
+      term_install_usage();
+    } else if (!term_parse_index(&args, &index)) {
+      term_puts("Usage: install <disk-index>; preview first, then type its exact erase confirmation.\n", 14);
+    } else {
+      term_skip_spaces(&args);
+      if (*args == '\0') {
+        term_install_preview(index);
+      } else if (strcmp(args, "ERASE ALL DATA") == 0) {
+        term_install_disk(index);
+      } else {
+        term_puts("Confirmation did not match. Run 'install <disk-index>' to preview.\n", 9);
+      }
+    }
+  } else if (strncmp(cmd, "format", 6) == 0 &&
+             (cmd[6] == ' ' || cmd[6] == '\0')) {
+    const char *args = cmd + 6;
+    uint32_t index;
+    term_skip_spaces(&args);
+    if (!term_parse_index(&args, &index)) {
+      term_puts("Usage: format <disk-index>; then type the exact erase confirmation shown.\n", 14);
+    } else {
+      term_skip_spaces(&args);
+      if (*args == '\0') {
+        term_format_preview(index);
+      } else if (strcmp(args, "ERASE ALL DATA") == 0) {
+        term_format_disk(index);
+      } else {
+        term_puts("Confirmation did not match. Run 'format <disk-index>' to preview.\n", 9);
+      }
+    }
+#endif
   } else if (strcmp(cmd, "uname") == 0 || strcmp(cmd, "uname -a") == 0) {
     term_puts("Vib-OS 1.0.0 x86_64\n", 11);
   } else if (strcmp(cmd, "neofetch") == 0) {
@@ -2297,6 +2545,13 @@ static void keyboard_callback(int key) {
   
   /* Any key press triggers redraw */
   needs_redraw = 1;
+
+#ifndef VIBOS_INSTALLED_BUILD
+  if (installer_gui_is_open()) {
+    installer_gui_handle_key(key);
+    return;
+  }
+#endif
   
   /* F1-F8: Change wallpaper */
   if (key >= KEY_F1 && key <= KEY_F8) {
@@ -2705,6 +2960,12 @@ static void smart_swap_buffers(void) {
 
 /* Handle mouse clicks */
 static void handle_mouse_click(int x, int y, int button) {
+#ifndef VIBOS_INSTALLED_BUILD
+  if (installer_gui_is_open()) {
+    installer_gui_handle_click(x, y, button);
+    return;
+  }
+#endif
   /* Check menu bar */
   if (y < MENU_BAR_HEIGHT) {
     if (x < 90) {
@@ -2755,7 +3016,13 @@ static void handle_mouse_click(int x, int y, int button) {
           case 6: snake.visible = !snake.visible; if (snake.visible) snake_init(); break; /* Snake */
           case 7: help_win.visible = !help_win.visible; break;         /* Help */
           case 8: img_viewer.visible = !img_viewer.visible; bring_window_to_front(WIN_IMAGE_VIEWER); break; /* Images/Browser */
-          case 9: /* DOOM - not implemented */ break;
+          case 9:
+#ifndef VIBOS_INSTALLED_BUILD
+            installer_gui_open();
+#else
+            /* DOOM - not implemented */
+#endif
+            break;
           default: break;
         }
       }
@@ -3195,6 +3462,13 @@ static void gui_poll_input(void) {
   
   if (left_click) {
     int clicked_window = 0;
+
+#ifndef VIBOS_INSTALLED_BUILD
+    if (installer_gui_is_open()) {
+      installer_gui_handle_click(mouse_x, mouse_y, 1);
+      clicked_window = 1;
+    }
+#endif
     
     /* Window data for unified handling */
     struct { int *visible; int *x; int *y; int *w; int *h; int win_id; int drag_id; } windows[] = {
@@ -3429,7 +3703,19 @@ static void gui_draw_all(void) {
   draw_dock();
   draw_menu_bar();
   draw_context_menu();
+#ifndef VIBOS_INSTALLED_BUILD
+  installer_gui_draw();
+#endif
   draw_cursor(mouse_x, mouse_y);
+}
+
+void gui_redraw_now(void) {
+  full_redraw = 1;
+  needs_redraw = 1;
+  gui_draw_all();
+  smart_swap_buffers();
+  needs_redraw = 0;
+  frame_count++;
 }
 
 void gui_compose(void) {
