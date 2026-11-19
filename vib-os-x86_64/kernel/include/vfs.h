@@ -37,6 +37,7 @@
 #define EISDIR      21  /* Is a directory */
 #define EINVAL      22  /* Invalid argument */
 #define ENOSPC      28  /* No space left */
+#define EROFS       30  /* Read-only filesystem */
 #define ENAMETOOLONG 36 /* File name too long */
 #define ENOTEMPTY   39  /* Directory not empty */
 
@@ -60,6 +61,9 @@ typedef struct {
   int flags;
   size_t pos;         /* Current position */
 } file_t;
+
+typedef ssize_t (*vfs_read_at_fn)(void *context, uint64_t offset,
+                                  void *buffer, size_t count);
 
 /* Initialize VFS */
 void vfs_init(void);
@@ -86,5 +90,7 @@ int vfs_exists(const char *path);
 int vfs_create(const char *path);
 int vfs_delete(const char *path);
 int vfs_rename(const char *oldpath, const char *newpath);
+int vfs_add_readonly_entry(const char *path, int is_directory, size_t size,
+                           void *context, vfs_read_at_fn read_at);
 
 #endif /* _VFS_H */

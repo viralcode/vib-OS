@@ -7,8 +7,12 @@
 #include "../include/limine.h"
 #include "../include/idt.h"
 #include "../include/acpi.h"
+#include "../include/ahci.h"
+#include "../include/block.h"
+#include "../include/fat32.h"
 #include "../include/string.h"
 #include "../include/types.h"
+#include "../include/vfs.h"
 
 /* ========== Limine Requests ========== */
 
@@ -293,6 +297,36 @@ void _start(void) {
     acpi_init(rsdp_request.response->address);
   } else {
     acpi_init(NULL);
+  }
+
+  /* Bring up the disk stack before the GUI consumes the VFS. */
+  vfs_init();
+  block_init();
+  if (vfs_mkdir("/mnt") != 0 && !vfs_exists("/mnt"))
+    serial_puts("VFS: could not create /mnt\n");
+  if (ahci_init() == 0) {
+    for (size_t i = 0; i < block_device_count(); ++i) {
+      block_device_t *device = block_device_at(i);
+      if (fat32_mount_first_volume(device) == 0) {
+        serial_puts("FAT32: mounted read-only at /mnt/");
+        serial_puts(device->name);
+        serial_puts("\n");
+
+        char kernel_path[64] = "/mnt/sda/BOOT/KERNEL.ELF";
+        file_t *probe = vfs_open(kernel_path, O_RDONLY);
+        if (probe) {
+          uint8_t magic[4] = {0};
+          ssize_t got = vfs_read(probe, magic, sizeof(magic));
+          if (got == 4 && magic[0] == 0x7F && magic[1] == 'E' &&
+              magic[2] == 'L' && magic[3] == 'F') {
+            serial_puts("STORAGE_SELFTEST: FAT32 VFS kernel read OK\n");
+            if (vfs_create("/mnt/sda/SHOULD.NOT") == -EROFS)
+              serial_puts("STORAGE_SELFTEST: FAT32 VFS read-only guard OK\n");
+          }
+          vfs_close(probe);
+        }
+      }
+    }
   }
 
   serial_puts("Framebuffer acquired:\n");

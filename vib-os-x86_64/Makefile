@@ -21,6 +21,7 @@ ISO_ROOT := iso_root
 # Output files
 KERNEL := $(BUILD_DIR)/kernel.elf
 ISO := uefi-demo.iso
+OUTPUT ?= $(BUILD_DIR)/vibos-x86_64-installer.img
 
 # Compiler flags
 CFLAGS := -target x86_64-unknown-none-elf \
@@ -73,14 +74,17 @@ LDFLAGS := -nostdlib \
 SOURCES := $(KERNEL_DIR)/boot/limine_boot.c \
            $(KERNEL_DIR)/lib/string.c \
            $(KERNEL_DIR)/mm/kmalloc.c \
-           $(KERNEL_DIR)/mm/mmio.c \
-           $(KERNEL_DIR)/fs/vfs.c \
-           $(KERNEL_DIR)/drivers/framebuffer.c \
+	           $(KERNEL_DIR)/mm/mmio.c \
+	           $(KERNEL_DIR)/fs/vfs.c \
+	           $(KERNEL_DIR)/fs/fat32.c \
+	           $(KERNEL_DIR)/drivers/framebuffer.c \
            $(KERNEL_DIR)/drivers/idt.c \
            $(KERNEL_DIR)/drivers/wc.c \
            $(KERNEL_DIR)/drivers/ps2.c \
-           $(KERNEL_DIR)/drivers/pci.c \
-           $(KERNEL_DIR)/drivers/acpi.c \
+	           $(KERNEL_DIR)/drivers/pci.c \
+	           $(KERNEL_DIR)/drivers/block.c \
+	           $(KERNEL_DIR)/drivers/ahci.c \
+	           $(KERNEL_DIR)/drivers/acpi.c \
            $(KERNEL_DIR)/drivers/usb.c \
            $(KERNEL_DIR)/drivers/usb_hid.c \
            $(KERNEL_DIR)/drivers/usb_xhci.c \
@@ -173,12 +177,21 @@ $(ISO): $(KERNEL) $(LIMINE_DIR)
 	@echo "  ISO created: $(ISO)"
 	@echo "============================================"
 	@echo ""
-	@echo "To test in QEMU:"
-	@echo "  make run"
-	@echo ""
-	@echo "To flash to USB (replace /dev/sdX):"
-	@echo "  sudo dd if=$(ISO) of=/dev/sdX bs=4M status=progress"
-	@echo ""
+		@echo "To test in QEMU:"
+		@echo "  make run"
+		@echo ""
+		@echo "Create a safe, regular-file UEFI disk image with:"
+		@echo "  make installer-image OUTPUT=/path/to/new-image.img"
+		@echo ""
+
+# Build a UEFI disk image into a new regular file (never a host block device).
+.PHONY: installer-image test-installer
+installer-image: $(KERNEL)
+	bash scripts/create-install-image.sh "$(OUTPUT)"
+
+# Boot a disposable image under OVMF/QEMU and verify AHCI -> FAT32 -> VFS readback.
+test-installer: $(KERNEL)
+	bash scripts/test-installer-qemu.sh
 
 # Run in QEMU
 .PHONY: run
@@ -222,6 +235,8 @@ help:
 	@echo "  all       - Build the bootable ISO (default)"
 	@echo "  run       - Run in QEMU with UEFI"
 	@echo "  run-bios  - Run in QEMU with legacy BIOS"
+	@echo "  installer-image - Create a new safe UEFI disk image file"
+	@echo "  test-installer  - Boot a disposable image and test AHCI/FAT32/VFS"
 	@echo "  clean     - Remove build files"
 	@echo "  distclean - Remove build files and Limine"
 	@echo "  help      - Show this help"

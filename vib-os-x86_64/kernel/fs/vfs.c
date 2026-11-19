@@ -15,6 +15,9 @@ typedef struct inode {
   size_t size;
   size_t capacity;
   int parent;         /* Parent inode index, -1 for root */
+  int readonly;
+  void *backend_context;
+  vfs_read_at_fn backend_read_at;
 } inode_t;
 
 /* Filesystem state */
@@ -105,6 +108,9 @@ static int create_inode(const char *path, int type) {
   node->data = NULL;
   node->size = 0;
   node->capacity = 0;
+  node->readonly = 0;
+  node->backend_context = NULL;
+  node->backend_read_at = NULL;
   
   /* Find parent */
   char parent_path[MAX_PATH];
@@ -112,6 +118,27 @@ static int create_inode(const char *path, int type) {
   node->parent = find_inode(parent_path);
   
   return idx;
+}
+
+int vfs_add_readonly_entry(const char *path, int is_directory, size_t size,
+                           void *context, vfs_read_at_fn read_at) {
+  if (!vfs_initialized) vfs_init();
+  if (!path || path[0] != '/' || strlen(path) >= MAX_PATH ||
+      find_inode(path) >= 0)
+    return -EINVAL;
+
+  char parent_path[MAX_PATH];
+  get_parent_path(path, parent_path);
+  int parent = find_inode(parent_path);
+  if (parent < 0 || inodes[parent].type != 1) return -ENOENT;
+
+  int idx = create_inode(path, is_directory ? 1 : 0);
+  if (idx < 0) return idx;
+  inodes[idx].size = size;
+  inodes[idx].readonly = 1;
+  inodes[idx].backend_context = context;
+  inodes[idx].backend_read_at = read_at;
+  return 0;
 }
 
 /* Initialize VFS */
@@ -192,6 +219,11 @@ file_t *vfs_open(const char *path, int flags) {
   
   if (idx < 0) {
     if (flags & O_CREAT) {
+      char parent_path[MAX_PATH];
+      get_parent_path(path, parent_path);
+      int parent = find_inode(parent_path);
+      if (parent < 0 || inodes[parent].type != 1 || inodes[parent].readonly)
+        return NULL;
       idx = create_inode(path, 0); /* Create file */
       if (idx < 0) return NULL;
     } else {
@@ -201,6 +233,11 @@ file_t *vfs_open(const char *path, int flags) {
   
   /* Don't open directories as files */
   if (inodes[idx].type == 1) return NULL;
+
+  /* Disk-backed entries are read-only, including truncate/append opens. */
+  if (inodes[idx].readonly &&
+      (flags & (O_WRONLY | O_RDWR | O_TRUNC | O_APPEND)))
+    return NULL;
   
   /* Truncate if requested */
   if (flags & O_TRUNC) {
@@ -237,6 +274,16 @@ ssize_t vfs_read(file_t *file, void *buf, size_t count) {
   if (node->type == 1) return -EISDIR;
   
   if (file->pos >= node->size) return 0;
+
+  if (node->readonly) {
+    if (!node->backend_read_at) return -EIO;
+    size_t available = node->size - file->pos;
+    size_t to_read = count < available ? count : available;
+    ssize_t result = node->backend_read_at(node->backend_context, file->pos,
+                                           buf, to_read);
+    if (result > 0) file->pos += (size_t)result;
+    return result;
+  }
   
   size_t available = node->size - file->pos;
   size_t to_read = (count < available) ? count : available;
@@ -255,6 +302,7 @@ ssize_t vfs_write(file_t *file, const void *buf, size_t count) {
   
   inode_t *node = &inodes[file->inode];
   if (node->type == 1) return -EISDIR;
+  if (node->readonly) return -EROFS;
   
   size_t new_size = file->pos + count;
   
@@ -304,6 +352,11 @@ int vfs_seek(file_t *file, int offset, int whence) {
 /* Create directory */
 int vfs_mkdir(const char *path) {
   if (!vfs_initialized) vfs_init();
+  char parent_path[MAX_PATH];
+  get_parent_path(path, parent_path);
+  int parent = find_inode(parent_path);
+  if (parent < 0 || inodes[parent].type != 1) return -ENOENT;
+  if (inodes[parent].readonly) return -EROFS;
   return create_inode(path, 1);
 }
 
@@ -348,6 +401,12 @@ int vfs_exists(const char *path) {
 /* Create file */
 int vfs_create(const char *path) {
   if (!vfs_initialized) vfs_init();
+  if (!path || path[0] != '/' || strlen(path) >= MAX_PATH) return -EINVAL;
+  char parent_path[MAX_PATH];
+  get_parent_path(path, parent_path);
+  int parent = find_inode(parent_path);
+  if (parent < 0 || inodes[parent].type != 1) return -ENOENT;
+  if (inodes[parent].readonly) return -EROFS;
   return create_inode(path, 0);
 }
 
@@ -356,6 +415,9 @@ int vfs_delete(const char *path) {
   int idx = find_inode(path);
   if (idx < 0) return -ENOENT;
   if (idx == 0) return -EINVAL; /* Can't delete root */
+  int parent = inodes[idx].parent;
+  if (inodes[idx].readonly || parent < 0 || inodes[parent].readonly)
+    return -EROFS;
   
   /* Check if directory is empty */
   if (inodes[idx].type == 1) {
@@ -390,7 +452,14 @@ int vfs_delete(const char *path) {
 int vfs_rename(const char *oldpath, const char *newpath) {
   int idx = find_inode(oldpath);
   if (idx < 0) return -ENOENT;
+  if (inodes[idx].readonly) return -EROFS;
   if (find_inode(newpath) >= 0) return -EEXIST;
+
+  char new_parent_path[MAX_PATH];
+  get_parent_path(newpath, new_parent_path);
+  int new_parent = find_inode(new_parent_path);
+  if (new_parent < 0 || inodes[new_parent].type != 1) return -ENOENT;
+  if (inodes[new_parent].readonly) return -EROFS;
   
   str_cpy(inodes[idx].path, newpath, MAX_PATH);
   get_filename(newpath, inodes[idx].name);
